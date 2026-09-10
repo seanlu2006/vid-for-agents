@@ -85,6 +85,13 @@ done
 
 STAMP=$(date +%Y%m%d-%H%M%S)
 
+# ── 暫存目錄：不管正常結束還是中途失敗（下載失敗、Ctrl-C、ffmpeg 爆掉）
+#    都要清掉，別把整支影片留在 /var/folders。宣告在 TMPD 可能被建立之前，
+#    並用 ${TMPD:-} 以相容 set -u。
+TMPD=""
+cleanup() { [[ -n "${TMPD:-}" ]] && rm -rf "$TMPD"; return 0; }
+trap cleanup EXIT
+
 # ── 1. 取得影片：URL 就下載，本機檔就複製路徑 ─────────────────────────────
 WORKDIR=""
 VIDEO=""
@@ -209,7 +216,7 @@ fi
 if [[ $KEEP_VIDEO -eq 1 && "$INPUT" =~ ^https?:// ]]; then
   cp "$VIDEO" "$OUTDIR/source.${VIDEO##*.}"
 fi
-[[ -n "${TMPD:-}" ]] && rm -rf "$TMPD"
+# TMPD 交給 EXIT trap 清，這裡不用再手動 rm
 
 # ── 6. 產生給 Claude 讀的 README.md ──────────────────────────────────────
 {
