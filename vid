@@ -53,14 +53,38 @@ print(t or "video")
 
 [[ $# -eq 0 ]] && { sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
 
+# ── 吃參數的選項：缺參數/型別錯，在解析階段就擋下來 ──────────────────────
+# $1=選項名  $2=剩下的參數個數(含選項本身)  $3=參數值(可能不存在)
+need_val() {
+  local opt="$1" argc="$2" val="${3:-}"
+  [[ $argc -ge 2 ]] || die "選項 $opt 需要一個參數"
+  [[ -n "$val" ]] || die "選項 $opt 的參數不能是空的"
+  [[ "$val" == -* ]] && die "選項 $opt 需要一個參數，但後面接到的是另一個選項: $val"
+  return 0
+}
+
 INPUT=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -n|--frames)  FRAMES="$2"; shift 2 ;;
-    -l|--lang)    LANG_CODE="$2"; shift 2 ;;
-    -c|--cookies) COOKIES="$2"; shift 2 ;;
-    -o|--outdir)  OUTROOT="$2"; shift 2 ;;
-    --model)      MODEL="$2"; shift 2 ;;
+    -n|--frames)
+      [[ $# -ge 2 ]] || die "選項 $1 需要一個數字參數，例如: -n 12"
+      [[ "$2" =~ ^[0-9]+$ ]] || die "選項 $1 需要一個大於 0 的整數，收到: $2"
+      [[ "$2" -gt 0 ]] || die "選項 $1 需要一個大於 0 的整數，收到: $2"
+      FRAMES="$2"; shift 2 ;;
+    -l|--lang)
+      need_val "$1" $# "${2:-}"
+      [[ "$2" =~ ^[A-Za-z][A-Za-z0-9_-]*$ ]] || die "選項 $1 需要一個語言代碼（auto / zh / en …），收到: $2"
+      LANG_CODE="$2"; shift 2 ;;
+    -c|--cookies)
+      need_val "$1" $# "${2:-}"
+      COOKIES="$2"; shift 2 ;;
+    -o|--outdir)
+      need_val "$1" $# "${2:-}"
+      OUTROOT="$2"; shift 2 ;;
+    --model)
+      need_val "$1" $# "${2:-}"
+      [[ "$2" =~ ^[A-Za-z0-9._-]+$ ]] || die "選項 $1 的模型名只能有英數字與 . _ -，收到: $2"
+      MODEL="$2"; shift 2 ;;
     --no-frames)  DO_FRAMES=0; shift ;;
     --no-audio)   DO_AUDIO=0; shift ;;
     --keep-video) KEEP_VIDEO=1; shift ;;
