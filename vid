@@ -39,6 +39,18 @@ MODEL_DIR="$HOME/.cache/whisper-models"
 die() { echo "❌ $*" >&2; exit 1; }
 info() { echo "→ $*" >&2; }
 
+# ── slug：把標題/檔名轉成安全的目錄名 ────────────────────────────────────
+# URL 與本機檔兩條路徑共用同一套規則，避免行為分歧。
+# 保留 0-9 A-Z a-z 與 CJK 漢字(U+4E00-U+9FFF)，其餘一律收斂成單一 "-"。
+slugify() {
+  printf '%s' "$1" | python3 -c '
+import re, sys
+t = sys.stdin.buffer.read().decode("utf-8", "replace")
+t = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "-", t).strip("-")[:50].strip("-")
+print(t or "video")
+'
+}
+
 [[ $# -eq 0 ]] && { sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
 
 INPUT=""
@@ -104,20 +116,20 @@ if [[ "$INPUT" =~ ^https?:// ]]; then
   META_JSON=$(find "$TMPD" -maxdepth 1 -name '*.info.json' | head -1)
   [[ -z "$VIDEO" ]] && die "下載完卻找不到檔案"
 
-  TITLE=$(python3 -c "
-import json,sys,re
+  RAW_TITLE=$(python3 -c "
+import json,sys
 try:
     d=json.load(open(sys.argv[1]))
     t=d.get('title') or d.get('id') or 'video'
 except Exception:
     t='video'
-t=re.sub(r'[^0-9A-Za-z一-鿿]+','-',t).strip('-')[:50]
-print(t or 'video')
+print(t)
 " "$META_JSON" 2>/dev/null || echo "video")
+  TITLE=$(slugify "$RAW_TITLE")
 else
   [[ -f "$INPUT" ]] || die "檔案不存在: $INPUT"
   VIDEO="$INPUT"
-  TITLE=$(basename "${INPUT%.*}" | tr -c '0-9A-Za-z\n' '-' | sed 's/-\{2,\}/-/g;s/^-//;s/-$//' | cut -c1-50)
+  TITLE=$(slugify "$(basename "${INPUT%.*}")")
 fi
 
 OUTDIR="$OUTROOT/${TITLE}-${STAMP}"
