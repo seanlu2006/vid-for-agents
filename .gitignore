@@ -1,0 +1,8 @@
+media-out/
+*.mp4
+*.mkv
+*.webm
+*.wav
+*.aiff
+*.bin
+.DS_Store

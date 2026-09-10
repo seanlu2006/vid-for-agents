@@ -1,0 +1,250 @@
+#!/usr/bin/env bash
+# vid — 把影片變成「Claude 讀得懂的東西」：抽樣影格(圖) + 逐字稿(文字) + meta
+#
+# 用法:
+#   vid <URL或本機檔案> [選項]
+#
+# 選項:
+#   -n, --frames N      抽幾張影格 (預設 12)
+#   -l, --lang CODE     逐字稿語言 (預設 auto；中文用 zh，英文用 en)
+#   -c, --cookies BROWSER  用瀏覽器 cookie 抓需登入的內容 (chrome/safari/firefox/edge)
+#   -o, --outdir DIR    輸出根目錄 (預設 ~/media-out)
+#       --no-frames     不抽影格（只要逐字稿）
+#       --no-audio      不轉逐字稿（只要影格）
+#       --keep-video    保留原始影片檔（預設保留；用 --no-keep 刪掉省空間）
+#       --no-keep       處理完刪掉原始影片
+#       --model NAME    whisper 模型 (預設 large-v3-turbo-q5_0)
+#   -h, --help          這段說明
+#
+# 輸出: <outdir>/<標題slug>-<時間戳>/
+#   ├── README.md      ← 給 Claude 讀的入口（含 meta + 逐字稿全文 + 影格清單）
+#   ├── meta.json      ← yt-dlp 抓到的原始 metadata
+#   ├── frames/        ← f001.jpg ... 依時間排序，檔名含秒數
+#   ├── transcript.txt ← 純文字逐字稿
+#   ├── transcript.srt ← 帶時間軸
+#   └── source.*       ← 原始影片
+
+set -euo pipefail
+
+FRAMES=12
+LANG_CODE="auto"
+COOKIES=""
+OUTROOT="$HOME/media-out"
+DO_FRAMES=1
+DO_AUDIO=1
+KEEP_VIDEO=1
+MODEL="large-v3-turbo-q5_0"
+MODEL_DIR="$HOME/.cache/whisper-models"
+
+die() { echo "❌ $*" >&2; exit 1; }
+info() { echo "→ $*" >&2; }
+
+[[ $# -eq 0 ]] && { sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
+
+INPUT=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -n|--frames)  FRAMES="$2"; shift 2 ;;
+    -l|--lang)    LANG_CODE="$2"; shift 2 ;;
+    -c|--cookies) COOKIES="$2"; shift 2 ;;
+    -o|--outdir)  OUTROOT="$2"; shift 2 ;;
+    --model)      MODEL="$2"; shift 2 ;;
+    --no-frames)  DO_FRAMES=0; shift ;;
+    --no-audio)   DO_AUDIO=0; shift ;;
+    --keep-video) KEEP_VIDEO=1; shift ;;
+    --no-keep)    KEEP_VIDEO=0; shift ;;
+    -h|--help)    sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -*)           die "不認識的選項: $1" ;;
+    *)            INPUT="$1"; shift ;;
+  esac
+done
+
+[[ -z "$INPUT" ]] && die "要給我一個 URL 或影片檔路徑"
+
+command -v ffmpeg  >/dev/null || die "沒裝 ffmpeg。跑: brew install ffmpeg"
+command -v ffprobe >/dev/null || die "沒裝 ffprobe（在 ffmpeg 裡）"
+
+# ── whisper 二進位名字在不同版本不一樣，逐一找 ────────────────────────────
+WHISPER=""
+for c in whisper-cli whisper-cpp whisper main; do
+  if command -v "$c" >/dev/null 2>&1; then WHISPER="$c"; break; fi
+done
+
+STAMP=$(date +%Y%m%d-%H%M%S)
+
+# ── 1. 取得影片：URL 就下載，本機檔就複製路徑 ─────────────────────────────
+WORKDIR=""
+VIDEO=""
+META_JSON=""
+
+if [[ "$INPUT" =~ ^https?:// ]]; then
+  command -v yt-dlp >/dev/null || die "沒裝 yt-dlp。跑: brew install yt-dlp"
+  TMPD=$(mktemp -d)
+  YTARGS=(-f "bv*[height<=1080]+ba/b" --merge-output-format mp4
+          --write-info-json --no-playlist --restrict-filenames
+          -o "$TMPD/src.%(ext)s")
+  [[ -n "$COOKIES" ]] && YTARGS+=(--cookies-from-browser "$COOKIES")
+
+  info "下載中: $INPUT"
+  if ! yt-dlp "${YTARGS[@]}" "$INPUT"; then
+    # Threads 沒有專屬 extractor，用 generic 撈 og:video 再試一次
+    info "專屬 extractor 失敗，改用 generic 模式重試…"
+    if ! yt-dlp "${YTARGS[@]}" --force-generic-extractor "$INPUT"; then
+      echo "" >&2
+      echo "下載失敗。常見原因：" >&2
+      echo "  • 需要登入（IG/Threads 大多要）→ 加 -c chrome 用你瀏覽器的 cookie" >&2
+      echo "  • Threads 目前 yt-dlp 無專屬支援，只能靠 generic 撈 og:video，不保證成功" >&2
+      echo "  • yt-dlp 太舊 → brew upgrade yt-dlp" >&2
+      exit 1
+    fi
+  fi
+
+  VIDEO=$(find "$TMPD" -maxdepth 1 -type f ! -name '*.info.json' | head -1)
+  META_JSON=$(find "$TMPD" -maxdepth 1 -name '*.info.json' | head -1)
+  [[ -z "$VIDEO" ]] && die "下載完卻找不到檔案"
+
+  TITLE=$(python3 -c "
+import json,sys,re
+try:
+    d=json.load(open(sys.argv[1]))
+    t=d.get('title') or d.get('id') or 'video'
+except Exception:
+    t='video'
+t=re.sub(r'[^0-9A-Za-z一-鿿]+','-',t).strip('-')[:50]
+print(t or 'video')
+" "$META_JSON" 2>/dev/null || echo "video")
+else
+  [[ -f "$INPUT" ]] || die "檔案不存在: $INPUT"
+  VIDEO="$INPUT"
+  TITLE=$(basename "${INPUT%.*}" | tr -c '0-9A-Za-z\n' '-' | sed 's/-\{2,\}/-/g;s/^-//;s/-$//' | cut -c1-50)
+fi
+
+OUTDIR="$OUTROOT/${TITLE}-${STAMP}"
+mkdir -p "$OUTDIR"
+[[ -n "$META_JSON" ]] && cp "$META_JSON" "$OUTDIR/meta.json"
+
+# ── 2. 基本資訊 ──────────────────────────────────────────────────────────
+DURATION=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$VIDEO" 2>/dev/null | cut -d. -f1)
+DURATION=${DURATION:-0}
+RES=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0:s=x "$VIDEO" 2>/dev/null || echo "?")
+HAS_AUDIO=$(ffprobe -v error -select_streams a -show_entries stream=index -of csv=p=0 "$VIDEO" 2>/dev/null | head -1)
+info "時長 ${DURATION}s / 解析度 ${RES}"
+
+# ── 3. 抽影格 ────────────────────────────────────────────────────────────
+FRAME_LIST=""
+if [[ $DO_FRAMES -eq 1 && $DURATION -gt 0 ]]; then
+  mkdir -p "$OUTDIR/frames"
+  info "抽 $FRAMES 張影格…"
+  i=1
+  while [[ $i -le $FRAMES ]]; do
+    # 均勻取樣，避開頭尾黑畫面
+    T=$(python3 -c "print(round($DURATION*($i-0.5)/$FRAMES,2))")
+    MM=$(python3 -c "print(f'{int($T)//60:02d}m{int($T)%60:02d}s')")
+    OUT=$(printf "%s/frames/f%03d_%s.jpg" "$OUTDIR" "$i" "$MM")
+    ffmpeg -nostdin -loglevel error -ss "$T" -i "$VIDEO" \
+           -frames:v 1 -vf "scale='min(768,iw)':-2" -q:v 4 -y "$OUT" 2>/dev/null || true
+    [[ -f "$OUT" ]] && FRAME_LIST="${FRAME_LIST}- \`frames/$(basename "$OUT")\` (t=${MM})\n"
+    i=$((i+1))
+  done
+fi
+
+# ── 4. 逐字稿 ────────────────────────────────────────────────────────────
+TRANSCRIPT_NOTE=""
+if [[ $DO_AUDIO -eq 1 && -n "$HAS_AUDIO" ]]; then
+  if [[ -z "$WHISPER" ]]; then
+    TRANSCRIPT_NOTE="（跳過：找不到 whisper 執行檔，跑 brew install whisper-cpp）"
+  else
+    MODEL_FILE="$MODEL_DIR/ggml-${MODEL}.bin"
+    if [[ ! -f "$MODEL_FILE" ]]; then
+      mkdir -p "$MODEL_DIR"
+      info "第一次使用，下載 whisper 模型 ggml-${MODEL}.bin（一次性，之後不用再下）…"
+      curl -L --fail --progress-bar \
+        "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-${MODEL}.bin" \
+        -o "$MODEL_FILE.part" && mv "$MODEL_FILE.part" "$MODEL_FILE" \
+        || { rm -f "$MODEL_FILE.part"; die "模型下載失敗"; }
+    fi
+
+    info "轉逐字稿中（本機跑，長片要等）…"
+    ffmpeg -nostdin -loglevel error -i "$VIDEO" -ar 16000 -ac 1 -c:a pcm_s16le \
+           -y "$OUTDIR/audio.wav" 2>/dev/null
+
+    WARGS=(-m "$MODEL_FILE" -f "$OUTDIR/audio.wav" -of "$OUTDIR/transcript" -otxt -osrt -pp)
+    [[ "$LANG_CODE" != "auto" ]] && WARGS+=(-l "$LANG_CODE") || WARGS+=(-l auto)
+
+    if "$WHISPER" "${WARGS[@]}" >/dev/null 2>&1; then
+      rm -f "$OUTDIR/audio.wav"
+      # whisper 中文輸出是簡體，轉成台灣正體（含用詞轉換）
+      if command -v opencc >/dev/null 2>&1; then
+        for f in "$OUTDIR/transcript.txt" "$OUTDIR/transcript.srt"; do
+          [[ -f "$f" ]] || continue
+          if opencc -c s2twp -i "$f" -o "$f.tw" 2>/dev/null && [[ -s "$f.tw" ]]; then
+            mv "$f.tw" "$f"
+          else
+            rm -f "$f.tw"
+          fi
+        done
+      fi
+    else
+      TRANSCRIPT_NOTE="（whisper 執行失敗，audio.wav 留著讓你手動試）"
+    fi
+  fi
+elif [[ -z "$HAS_AUDIO" ]]; then
+  TRANSCRIPT_NOTE="（這支影片沒有音軌）"
+fi
+
+# ── 5. 保留原始影片 ──────────────────────────────────────────────────────
+if [[ $KEEP_VIDEO -eq 1 && "$INPUT" =~ ^https?:// ]]; then
+  cp "$VIDEO" "$OUTDIR/source.${VIDEO##*.}"
+fi
+[[ -n "${TMPD:-}" ]] && rm -rf "$TMPD"
+
+# ── 6. 產生給 Claude 讀的 README.md ──────────────────────────────────────
+{
+  echo "# 影片內容包"
+  echo ""
+  echo "- 來源: \`$INPUT\`"
+  echo "- 時長: ${DURATION}s ｜ 解析度: ${RES}"
+  echo "- 產生時間: $(date '+%Y-%m-%d %H:%M:%S')"
+  echo ""
+  if [[ -f "$OUTDIR/meta.json" ]]; then
+    echo "## 貼文 / 影片 metadata"
+    echo ""
+    python3 - "$OUTDIR/meta.json" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1]))
+for k in ('title','uploader','channel','upload_date','duration','view_count','like_count','comment_count','webpage_url'):
+    if d.get(k) not in (None,''):
+        print(f"- **{k}**: {d[k]}")
+desc=(d.get('description') or '').strip()
+if desc:
+    print("\n### 原始貼文文字\n")
+    print("```")
+    print(desc[:4000])
+    print("```")
+PY
+    echo ""
+  fi
+  echo "## 逐字稿 $TRANSCRIPT_NOTE"
+  echo ""
+  if [[ -f "$OUTDIR/transcript.txt" ]]; then
+    echo '```'
+    cat "$OUTDIR/transcript.txt"
+    echo '```'
+    echo ""
+    echo "帶時間軸版本: \`transcript.srt\`"
+  else
+    echo "_無_"
+  fi
+  echo ""
+  echo "## 影格（用 Read 工具逐張看）"
+  echo ""
+  if [[ -n "$FRAME_LIST" ]]; then
+    printf "%b" "$FRAME_LIST"
+  else
+    echo "_無_"
+  fi
+} > "$OUTDIR/README.md"
+
+echo ""
+echo "✅ 完成 → $OUTDIR"
+echo "   叫 Claude 讀: $OUTDIR/README.md（逐字稿都在裡面），要看畫面就讀 frames/ 底下的圖"
