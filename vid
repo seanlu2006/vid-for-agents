@@ -39,7 +39,7 @@ MODEL_DIR="$HOME/.cache/whisper-models"
 die() { echo "❌ $*" >&2; exit 1; }
 info() { echo "→ $*" >&2; }
 
-[[ $# -eq 0 ]] && { sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
+[[ $# -eq 0 ]] && { sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
 
 INPUT=""
 while [[ $# -gt 0 ]]; do
@@ -53,7 +53,7 @@ while [[ $# -gt 0 ]]; do
     --no-audio)   DO_AUDIO=0; shift ;;
     --keep-video) KEEP_VIDEO=1; shift ;;
     --no-keep)    KEEP_VIDEO=0; shift ;;
-    -h|--help)    sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)    sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*)           die "不認識的選項: $1" ;;
     *)            INPUT="$1"; shift ;;
   esac
@@ -63,6 +63,7 @@ done
 
 command -v ffmpeg  >/dev/null || die "沒裝 ffmpeg。跑: brew install ffmpeg"
 command -v ffprobe >/dev/null || die "沒裝 ffprobe（在 ffmpeg 裡）"
+command -v python3 >/dev/null || die "沒裝 python3。macOS 跑: xcode-select --install（或 brew install python）"
 
 # ── whisper 二進位名字在不同版本不一樣，逐一找 ────────────────────────────
 WHISPER=""
