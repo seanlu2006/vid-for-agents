@@ -1,39 +1,37 @@
 # vid
 
-> 把影片變成 AI agent 讀得懂的東西：抽樣影格 + 本機逐字稿，一行指令，零 API 成本。
+[繁體中文](README.zh-TW.md)
 
-[English summary below ↓](#english)
-
----
-
-## 問題
-
-Claude Code、Cursor 這類 coding agent 能看圖、能讀文字，但沒辦法「播放」影片。你把一個 Reels 連結貼給它，它只能回你「我沒辦法看影片」。
-
-於是每次想讓 AI 幫你消化一支教學影片、一支競品的 UI 展示、一則你想存證的貼文，你都得自己看完、自己截圖、自己打逐字稿——AI 幫不上忙的那段，剛好是最花時間的那段。
-
-## 怎麼解決
-
-核心觀察是：**agent 不需要真的「看影片」，它只需要影片裡的資訊。**
-
-而一支影片的資訊，幾乎都能拆成兩軌：
-
-- **畫面** → 沿時間軸均勻抽樣的靜態影格。多數影片的畫面變化遠比 30fps 慢，12 張圖就能涵蓋一支短影片的所有場景。
-- **聲音** → 完整逐字稿。旁白講的每個字都在，一個字都沒少。
-
-這兩樣 agent 都吃得下。`vid` 就是把任意影片（本機檔案，或 YouTube / Instagram / TikTok 等 yt-dlp 支援的連結）自動拆成這兩軌，加上原始貼文 metadata，整理成一個資料夾，並產生一份**給 agent 讀的入口 `README.md`**。
-
-全程在本機跑，不呼叫任何雲端 API，影片不會離開你的電腦，處理幾支都是 $0。
+> One command turns a video into the two things an AI agent can actually read: sampled frames and a full transcript. The processing runs on your own machine, so every video costs $0.
 
 ---
 
-## 安裝
+## The problem
 
-**環境需求**：macOS（Apple Silicon 或 Intel）、[Homebrew](https://brew.sh)、`python3`。
+Coding agents like Claude Code and Cursor read images and they read text. They cannot play video. Paste a Reel link into one and it tells you, politely, that it can't watch it.
 
-> macOS 沒有內建 `python3`。沒有的話跑 `xcode-select --install`，或 `brew install python`。
+So every time you want an agent to digest a tutorial, a competitor's UI walkthrough, or a post you want archived, you end up doing the slow part yourself — watching it, screenshotting it, typing out what was said. The part the agent can't help with is exactly the part that takes the time.
 
-### 一鍵安裝
+## The idea
+
+An agent doesn't need to *watch* a video. It needs what's in the video, and that splits cleanly into two tracks:
+
+- **Picture** → stills sampled at even intervals along the timeline. Most videos change far more slowly than 30 times a second; for a short clip, 12 frames covers essentially every scene.
+- **Sound** → a full transcript. Every word of the narration, none of it dropped.
+
+Both are things an agent can already read. `vid` takes any video — a local file, or any URL `yt-dlp` handles (YouTube, Instagram, TikTok, and so on) — splits it into those two tracks, adds the original post's metadata, and puts everything in one folder. The `README.md` it writes there is **designed to be the agent's entry point**.
+
+Transcription runs locally through `whisper.cpp`. The video never leaves your laptop, and the hundredth video costs the same as the first. The only network traffic is `yt-dlp` fetching the video and a one-time model download.
+
+---
+
+## Install
+
+**Requirements:** macOS (Apple Silicon or Intel), [Homebrew](https://brew.sh), and `python3`.
+
+> macOS doesn't ship `python3`. If you don't have it: `xcode-select --install`, or `brew install python`.
+
+### One command
 
 ```bash
 git clone https://github.com/seanlu2006/vid-for-agents.git
@@ -41,49 +39,47 @@ cd vid-for-agents
 ./install.sh
 ```
 
-`install.sh` 會做四件事，**只有這四件**：
+`install.sh` does four things, and only these four:
 
-| 動作 | 細節 |
+| Step | Detail |
 |---|---|
-| 用 `brew install` 裝缺少的套件 | `ffmpeg`、`yt-dlp`、`whisper-cpp`、`opencc`（已裝的會跳過） |
-| 下載語音模型 | 約 547 MB，存到 `~/.cache/whisper-models/`，一次性 |
-| 建立 symlink | `~/bin/vid` → 你 clone 下來的 `vid` |
-| 檢查 PATH | 若 `~/bin` 不在 PATH，**只印出**該加的那行給你自己執行 |
+| `brew install` what's missing | `ffmpeg`, `yt-dlp`, `whisper-cpp`, `opencc` — anything already installed is skipped |
+| Download the speech model | ~547 MB, one time, into `~/.cache/whisper-models/` |
+| Create a symlink | `~/bin/vid` → the `vid` in your clone |
+| Check your PATH | if `~/bin` isn't on it, the installer **prints** the line to add and leaves you to run it |
 
-它**不會**改你的 `.zshrc` / `.bashrc`，不會用 `sudo`，也不會下載執行任何遠端腳本。因為第 3 步是 symlink，**別在裝完後刪掉或搬走這個 repo 資料夾**，不然 `vid` 會失效。
+It doesn't edit your `.zshrc` or `.bashrc`, doesn't use `sudo`, and doesn't pipe a remote script into a shell. Step 3 is a symlink, so don't delete or move the cloned folder afterwards — `vid` points back into it.
 
-### 手動安裝
-
-不想跑腳本就自己來：
+### Manual install
 
 ```bash
 brew install ffmpeg yt-dlp whisper-cpp opencc
 git clone https://github.com/seanlu2006/vid-for-agents.git
 cd vid-for-agents && chmod +x vid
-ln -s "$PWD/vid" ~/bin/vid          # 或任何在你 PATH 上的目錄
+mkdir -p ~/bin && ln -s "$PWD/vid" ~/bin/vid   # or any directory already on your PATH
 ```
 
-語音模型不用手動抓——第一次需要轉逐字稿時 `vid` 會自己下載。
+No need to fetch the speech model by hand — `vid` downloads it the first time it has something to transcribe.
 
-### 相依套件各自負責什麼
+### What each dependency is for
 
-| 套件 | 用途 | 缺了會怎樣 |
+| Package | Used for | If it's missing |
 |---|---|---|
-| `ffmpeg` / `ffprobe` | 抽影格、轉音軌、讀影片資訊 | 直接中止 |
-| `python3` | 影格時間點計算、metadata 轉 Markdown | 直接中止 |
-| `yt-dlp` | 下載網路影片 + 貼文文字 | 只在給 URL 時需要；處理本機檔不用 |
-| `whisper-cpp` | 本機語音轉文字 | 跳過逐字稿，影格照抽 |
-| `opencc` | 簡體轉台灣正體 | 中文逐字稿會停在簡體 |
+| `ffmpeg` / `ffprobe` | extracting frames, converting audio, reading video properties | hard stop |
+| `python3` | frame timestamp arithmetic, metadata → Markdown | hard stop |
+| `yt-dlp` | downloading videos and post text | only needed for URLs; local files never touch it |
+| `whisper-cpp` | local speech-to-text | transcript skipped, frames still extracted |
+| `opencc` | Simplified → Traditional Chinese | Chinese transcripts stay in Simplified |
 
 ---
 
-## 用法
+## Usage
 
 ```
-vid <URL 或本機檔案路徑> [選項]
+vid <URL or path to a local file> [options]
 ```
 
-### 範例一：本機影片
+### A local file
 
 ```bash
 vid ~/Downloads/demo.mp4
@@ -95,53 +91,58 @@ vid ~/Downloads/demo.mp4
 → 轉逐字稿中（本機跑，長片要等）…
 
 ✅ 完成 → /Users/you/media-out/demo-20260911-004512
+   叫 Claude 讀: /Users/you/media-out/demo-20260911-004512/README.md（逐字稿都在裡面），要看畫面就讀 frames/ 底下的圖
 ```
 
-產出：
+The CLI itself speaks Traditional Chinese; the flags are in English. That last line says: *tell Claude to read `…/README.md` — the transcript is in there — and look at the images under `frames/` when you need the picture.* See [Known limitations](#known-limitations).
+
+What you get:
 
 ```
 ~/media-out/demo-20260911-004512/
-├── README.md          給 agent 讀的入口
+├── README.md          the entry point for the agent
 ├── frames/
 │   ├── f001_00m03s.jpg
 │   ├── f002_00m10s.jpg
 │   ├── …
 │   └── f012_01m19s.jpg
-├── transcript.txt     純文字逐字稿
-└── transcript.srt     帶時間軸
+├── transcript.txt     plain text
+└── transcript.srt     with timecodes
 ```
 
-整包大約 200 KB。注意處理本機檔案時**不會**產生 `meta.json`（沒有貼文可抓），也**不會**複製一份 `source.mp4`（你原本的檔案就在那，不動它）。
+Roughly 200 KB in total. A local file produces no `meta.json` (there's no post to read) and no copy of the source video — your file is already on disk and `vid` never touches it.
 
-### 範例二：YouTube
+### YouTube
 
 ```bash
 vid "https://www.youtube.com/watch?v=XXXXXXXXXXX" -l zh -n 30
 ```
 
-`-l zh` 指定中文（比 auto 準），`-n 30` 抽 30 張影格（畫面資訊密集時調高）。多出兩個檔案：
+`-l zh` pins the transcript language; pinning it is more accurate than leaving Whisper to auto-detect. `-n 30` takes 30 frames instead of 12 — worth doing when there's a lot on screen. Two extra files appear:
 
 ```
-~/media-out/影片標題-20260911-004512/
+~/media-out/How-to-make-an-agent-read-a-video-20260911-004512/
 ├── README.md
-├── meta.json          yt-dlp 抓到的完整 metadata
-├── frames/            30 張
+├── meta.json          the full metadata yt-dlp collected
+├── frames/            30 of them
 ├── transcript.txt
 ├── transcript.srt
-└── source.mp4         下載回來的原始影片
+└── source.mp4         the downloaded video (extension follows the actual download)
 ```
 
-### 範例三：Instagram Reels
+Downloads prefer the best stream at 1080p or below and are merged into an MP4. When a site offers only a single pre-muxed stream, `yt-dlp` falls back to its best available format, which may exceed 1080p and may not be an MP4 — so the saved file takes the extension of whatever actually came down, and isn't always `source.mp4`. A URL pointing at a video *inside* a playlist (`…&list=…`) gives you just that one video; a bare playlist URL is not supported, and pointing `vid` at one gives unpredictable results.
 
-需要登入才看得到的內容，得借你瀏覽器的 cookie：
+### Instagram Reels
+
+Anything behind a login needs your browser's cookies:
 
 ```bash
 vid "https://www.instagram.com/reel/XXXXXXXXXXX/" -c chrome
 ```
 
-`-c chrome` 會讓 yt-dlp 讀取 Chrome 的 cookie 資料庫，macOS 上可能跳出鑰匙圈授權視窗。這件事完全在本機發生，cookie 不會被送去任何地方——但你如果不放心，用 `-c safari` 或乾脆手動下載影片再餵本機檔案也行。
+`-c chrome` has `yt-dlp` read Chrome's cookie database; on macOS that may trigger a Keychain prompt. It happens entirely on your machine and the cookies aren't sent anywhere — but if you'd rather not, use `-c safari`, or just download the video yourself and hand `vid` the local file.
 
-### 產出的 `README.md` 長這樣
+### The `README.md` it generates
 
 ```markdown
 # 影片內容包
@@ -152,7 +153,7 @@ vid "https://www.instagram.com/reel/XXXXXXXXXXX/" -c chrome
 
 ## 貼文 / 影片 metadata
 
-- **title**: 如何用 AI 讀影片
+- **title**: How to make an agent read a video
 - **uploader**: Sean Lu
 - **upload_date**: 20260901
 - **view_count**: 1234
@@ -160,11 +161,11 @@ vid "https://www.instagram.com/reel/XXXXXXXXXXX/" -c chrome
 
 ### 原始貼文文字
 
-（貼文內文，最多 4000 字）
+(the post's own text, first 4,000 characters)
 
 ## 逐字稿
 
-（全文直接內嵌在這裡）
+(the whole transcript, inline, right here)
 
 帶時間軸版本: `transcript.srt`
 
@@ -175,168 +176,143 @@ vid "https://www.instagram.com/reel/XXXXXXXXXXX/" -c chrome
 - …
 ```
 
-### 選項
+The headings are Chinese — `影片內容包` is "video content pack", `逐字稿` is "transcript", `影格` is "frames". The shape is what matters, and every agent I've tried has read it without complaint.
 
-| 選項 | 說明 | 預設 |
+If Whisper fails, or the video has no audio track, a short Chinese note is appended to the `逐字稿` heading explaining why. A failed run also leaves `audio.wav` (16 kHz mono) in the folder so you can retry by hand.
+
+### Options
+
+| Option | What it does | Default |
 |---|---|---|
-| `-n, --frames N` | 抽幾張影格 | `12` |
-| `-l, --lang CODE` | 逐字稿語言：`zh`、`en`、`ja`… 或 `auto` 自動偵測 | `auto` |
-| `-c, --cookies BROWSER` | 借瀏覽器 cookie 抓需登入的內容：`chrome` / `safari` / `firefox` / `edge` | 不使用 |
-| `-o, --outdir DIR` | 輸出根目錄 | `~/media-out` |
-| `--model NAME` | whisper 模型名稱 | `large-v3-turbo-q5_0` |
-| `--no-frames` | 不抽影格（只要逐字稿） | 兩者都做 |
-| `--no-audio` | 不轉逐字稿（只要影格） | 兩者都做 |
-| `--keep-video` | 保留下載回來的原始影片 | 已是預設 |
-| `--no-keep` | 處理完刪掉下載回來的影片，省空間 | 保留 |
-| `-h, --help` | 說明 | — |
+| `-n, --frames N` | how many frames to sample | `12` |
+| `-l, --lang CODE` | transcript language: `zh`, `en`, `ja`, and so on, or `auto` to detect | `auto` |
+| `-c, --cookies BROWSER` | borrow browser cookies for login-gated content: `chrome` / `safari` / `firefox` / `edge` | off |
+| `-o, --outdir DIR` | output root | `~/media-out` |
+| `--model NAME` | Whisper model | `large-v3-turbo-q5_0` |
+| `--no-frames` | transcript only | does both |
+| `--no-audio` | frames only | does both |
+| `--keep-video` | keep the downloaded video | already the default |
+| `--no-keep` | delete the downloaded video when done | keeps it |
+| `-h, --help` | usage | — |
 
-幾點補充：
+A few things worth knowing:
 
-- `--keep-video` 和 `--no-keep` **只影響從 URL 下載的影片**。處理本機檔案時兩者都是空操作，`vid` 永遠不會動你原本的檔案。
-- `--model` 的值會被拼成 `ggml-<NAME>.bin`，去 [huggingface.co/ggerganov/whisper.cpp](https://huggingface.co/ggerganov/whisper.cpp) 抓。想跑快一點可以試 `base`、`small`；想更準可以試 `large-v3`。完整清單看那個 repo。
-- 輸出目錄名稱是 `<標題 slug>-<YYYYMMDD-HHMMSS>`，帶時間戳所以不會互相覆蓋。
+- `--keep-video` and `--no-keep` **only apply to videos downloaded from a URL**. On a local file both are no-ops; `vid` never modifies or deletes your own file.
+- `--model` is interpolated into `ggml-<NAME>.bin` and fetched from [huggingface.co/ggerganov/whisper.cpp](https://huggingface.co/ggerganov/whisper.cpp). For speed try `base` or `small`; for accuracy try `large-v3`. That repo has the full list.
+- `-c` is passed straight through to `yt-dlp --cookies-from-browser`, so anything `yt-dlp` supports works, not just the four listed above.
+- Output directories are named `<title slug>-<YYYYMMDD-HHMMSS>`. The slug keeps ASCII alphanumerics and Han characters (U+4E00–U+9FFF), collapses everything else into a single `-`, and is cut off at 50 characters. Note that this drops Japanese kana, Hangul, Cyrillic, and accented Latin: `アニメの作り方` becomes `作-方`, and a title made only of such characters falls back to `video`. The timestamp means two runs never overwrite each other.
 
 ---
 
-## 搭配 AI agent 使用
+## Using it with an agent
 
-這是這個工具存在的理由。以 Claude Code 為例：
+This is the reason the tool exists. With Claude Code:
 
 ```bash
-# 1. 在 terminal 跑
-vid "https://www.youtube.com/watch?v=XXXXXXXXXXX" -l zh
-# → 完成 → /Users/you/media-out/如何用-AI-讀影片-20260911-004512
+# 1. in your terminal
+vid "https://www.youtube.com/watch?v=XXXXXXXXXXX" -l en
+# → ✅ 完成 → /Users/you/media-out/How-to-make-an-agent-read-a-video-20260911-004512
 ```
 
 ```
-# 2. 在 Claude Code 裡直接說
-> 讀 ~/media-out/如何用-AI-讀影片-20260911-004512/README.md，
-  把這支影片講的步驟整理成一份筆記
+# 2. in Claude Code
+> read ~/media-out/How-to-make-an-agent-read-a-video-20260911-004512/README.md and turn
+  the steps in this video into notes
 ```
 
-agent 一次 Read 就拿到 metadata + 完整逐字稿，可以立刻開始整理。需要確認畫面時再補一句：
+One `Read` gets the agent the metadata and the entire transcript, so it can start immediately. When you need the picture, ask for it:
 
 ```
-> 第 4 分鐘他在展示什麼？看一下對應的影格
+> what's he demoing around the four-minute mark? look at the matching frame
 ```
 
-它會從影格清單挑出時間最接近的那張去 Read。
+It picks the closest timestamp from the frame list and reads that one image.
 
-### 為什麼入口檔要這樣設計
+### Why the entry file is shaped this way
 
-產出的 `README.md` 有個刻意的取捨：**逐字稿全文直接內嵌，影格只列檔名不內嵌。**
+The generated `README.md` makes one deliberate trade: **the transcript is embedded in full; the frames are listed by filename and never embedded.**
 
-因為文字便宜、圖片貴。逐字稿內嵌代表 agent 一次 Read 就掌握影片講了什麼，不用摸索；而 12 張圖如果全部塞進 context 會吃掉大量 token，其中大部分根本用不到。所以影格只列出「檔名 + 時間戳」，讓 agent 自己判斷該看哪張、要不要看——通常讀完逐字稿後，它只需要一兩張圖就能回答問題。
+Text is cheap and images are expensive. Inlining the transcript means a single read tells the agent what the video is about — no hunting. Inlining 12 images would burn a large amount of context on pictures that mostly go unused. So the frames appear as a filename plus a timestamp, and the agent decides which ones are worth opening. In practice, once it has the transcript, one or two frames are enough to answer the question.
 
-同樣的邏輯也適用於其他 agent（Cursor、Codex、任何有讀檔和讀圖能力的工具）——`vid` 產出的就是一般的資料夾和一般的檔案，沒有綁定任何特定平台。
+Nothing here is specific to Claude Code. The output is an ordinary folder of ordinary files — any agent that can read a file and look at an image works the same way.
 
 ---
 
-## 技術架構
+## How it works
 
 ```
-輸入 ─┬─ URL ──► yt-dlp ──► 影片檔 + info.json（標題/作者/貼文原文/讚數）
-      │
-      └─ 本機檔案 ──► 直接使用
+input ─┬─ URL ──────────► yt-dlp ──► video file + info.json
+       │                             (title / uploader / post text / likes)
+       └─ local file ────► used in place
 
-                 影片檔
-                    │
-      ┌─────────────┴─────────────┐
-      │                           │
-   ffmpeg                      ffmpeg
-      │                           │
-  均勻抽樣影格               16kHz 單聲道 WAV
-  (JPEG, 寬 ≤768px)               │
-      │                    whisper.cpp（本機，Apple Silicon 走 Metal）
-      │                           │
-      │                     transcript.txt / .srt
-      │                           │
-      │                    opencc s2twp（簡體 → 台灣正體）
-      └─────────────┬─────────────┘
-                    │
-        產生 README.md（metadata + 逐字稿全文 + 影格索引）
+                           video file
+                                │
+              ┌─────────────────┴─────────────────┐
+              │                                   │
+           ffmpeg                              ffmpeg
+              │                                   │
+     evenly sampled frames               16 kHz mono WAV
+     (JPEG, ≤768 px wide)                         │
+              │              whisper.cpp (local; Metal on Apple Silicon)
+              │                                   │
+              │                     transcript.txt / transcript.srt
+              │                                   │
+              │              opencc s2twp (Simplified → Traditional Chinese)
+              └─────────────────┬─────────────────┘
+                                │
+        generated README.md (metadata + full transcript + frame index)
 ```
 
-### 各階段的設計取捨
+### The decisions behind each stage
 
-**抽樣**：第 i 張影格取在 `t = 影片長度 × (i − 0.5) / N`，也就是每個等分區間的中點，而不是端點——這樣自然避開開頭和結尾常見的黑畫面或轉場。影格縮到寬度 768px（原本就更窄就不放大），JPEG 品質 `-q:v 4`。這個尺寸剛好在多數 vision 模型的處理解析度附近，再大只是浪費 token。
+**Sampling.** Frame *i* is taken at `t = duration × (i − 0.5) / N` — the midpoint of each equal slice rather than its edge, which sidesteps the black frames and transitions that tend to sit at the very beginning and end. Frames are scaled to 768 px wide (never upscaled beyond their original width) at JPEG quality `-q:v 4`. That size sits near the processing resolution of most vision models; anything larger just wastes tokens.
 
-**轉錄用本機 whisper 而不是雲端 API**，理由有三個：
+**Local Whisper rather than a cloud API**, for three reasons:
 
-1. **成本**：本機跑一次和跑一百次都是 $0，不用擔心「這支影片值不值得花錢轉」。
-2. **隱私**：私人錄影、會議記錄、還沒公開的東西不用上傳給第三方。
-3. **無上限**：沒有檔案大小限制、沒有 rate limit、離線也能用。
+1. **Cost.** One video and a hundred videos both cost $0, so you never have to decide whether a clip is worth paying to transcribe.
+2. **Privacy.** Personal recordings, meeting notes, and unreleased material don't get handed to a third party.
+3. **No ceilings.** No file size limit, no rate limit, works offline.
 
-代價是第一次要下載 547 MB 模型，而且長影片得等——但在 Apple Silicon 上 whisper.cpp 走 Metal 加速，實際上比想像中快很多（見下）。
+The price is a 547 MB download the first time, and a genuine wait on long videos — though `whisper.cpp` uses Metal on Apple Silicon, which makes it quicker than you'd expect (numbers below).
 
-**簡繁轉換**：whisper 的中文輸出一律是簡體，而且用詞是中國大陸慣用語。`opencc -c s2twp` 不只做字形轉換，還會處理詞彙差異（软件 → 軟體、视频 → 影片），對台灣使用者來說這步驟是必要的。
+**Simplified to Traditional.** Whisper's Chinese output is always Simplified, with mainland vocabulary. `opencc -c s2twp` converts word choice as well as glyphs (软件 → 軟體, 视频 → 影片), which for a Taiwanese reader isn't optional.
 
-### 實測
+**Cleanup.** Downloads go to a `mktemp -d` directory that an `EXIT` trap removes, so a failed download or a Ctrl-C doesn't strand a full video in `/var/folders`. `vid` looks for the Whisper binary under every name it has shipped under: `whisper-cli`, `whisper-cpp`, `whisper`, then `main`.
 
-在 Apple M5 上，一支 83 秒、1280×720 的影片，抽 12 張影格 + 英文逐字稿：
+### Measured on my machine
+
+An 83-second 1280×720 clip, 12 frames plus an English transcript, on an Apple M5:
 
 ```
 real 4.43s
 ```
 
-輸出整包 204 KB。轉錄速度遠快於即時（約 0.05 倍影片長度），不過這高度取決於晶片世代和模型大小——舊機器或改用 `large-v3` 非量化模型會慢上數倍。
+Output is 204 KB in total. That 4.43s covers the whole pipeline — frame extraction, transcription, and README generation — which works out to about 0.05× the length of the video, or roughly 20× faster than real time. That ratio depends heavily on chip generation and model size: an older machine, or the unquantised `large-v3`, will be several times slower.
 
 ---
 
-## 已知限制
+## Known limitations
 
-1. **這是抽樣，不是「看影片」。** agent 拿到的是 N 張靜態影格。短影片抽 12 張大致等於看完，但**快速閃過的字卡、連續動作的細節、逐格變化的動畫**一定會漏。這類影片請把 `-n` 調到 30 以上，或者接受逐字稿才是主要資訊來源。
+1. **This is sampling, not watching.** The agent gets N stills. Twelve frames of a short clip is roughly equivalent to having seen it, but **fast-cut title cards, the details within a continuous action, and frame-by-frame animation will be missed**. For that kind of video, push `-n` above 30, or accept that the transcript is the primary source.
 
-2. **Threads 不支援。** yt-dlp 目前沒有 Threads 專屬 extractor。`vid` 會自動 fallback 到 generic 模式去撈網頁的 `og:video`，但成功率不高，別依賴它。
+2. **Threads doesn't work.** `yt-dlp` has no Threads extractor. `vid` falls back to the generic extractor and tries to pull `og:video` from the page, but the success rate is low — don't build on it.
 
-3. **需登入的內容一定要 `-c`。** Instagram 大部分貼文、部分 YouTube 影片不給匿名抓取，沒加 `-c chrome` 會直接下載失敗。而各平台的反爬蟲策略時常改動，`yt-dlp` 沒定期 `brew upgrade` 就容易壞。
+3. **Login-gated content needs `-c`.** Most Instagram posts and some YouTube videos refuse anonymous downloads and will simply fail without `-c chrome`. Platform anti-scraping measures also change constantly, so a `yt-dlp` you haven't `brew upgrade`d in a while is a common cause of breakage.
 
-4. **中文逐字稿會有錯字。** whisper 對中文的專有名詞、人名、英文夾雜的段落辨識率明顯低於英文，opencc 也只能修字形不能修辨識錯誤。當草稿看，別當引用來源。另外沒裝 `opencc` 的話輸出會停在簡體。
+4. **Chinese transcripts contain errors.** Whisper is noticeably weaker on Chinese proper nouns, names, and passages that mix in English, and `opencc` only fixes characters, not misrecognition. Treat the output as a draft, not as something to quote. Without `opencc` installed, the output stays in Simplified.
 
-5. **只在 macOS 測試過。** 核心邏輯是標準 POSIX 工具，Linux 理論上把 `brew` 換成 `apt` / `pacman` 就能跑，但沒驗證過，`install.sh` 也會直接拒絕在非 macOS 執行。Windows 沒測過。
+5. **The interface is in Traditional Chinese.** `vid --help`, the progress lines, the error messages, and the section headings of the generated `README.md` are all in Chinese. The flags are in English and agents read the output fine, but nothing else is translated yet.
 
----
-
-## 請合理使用
-
-抓下來的內容著作權屬於原作者。這個工具的設計用途是**個人理解、學習研究、內容存證**，不是拿來重製散布別人的作品。請遵守各平台的服務條款。
+6. **Only tested on macOS.** It's all standard POSIX tooling, so Linux should work if you swap `brew` for `apt` or `pacman`, but I haven't verified that, and `install.sh` refuses to run anywhere other than macOS. Windows is untested.
 
 ---
 
-<a name="english"></a>
+## Please use this responsibly
 
-## English
-
-**vid** turns any video into something an AI coding agent can actually read: evenly sampled frames plus a full local transcript. No cloud APIs, no per-video cost, nothing leaves your machine.
-
-Agents like Claude Code can read images and text but cannot play video. `vid` bridges that gap — it downloads the video (or takes a local file), samples N frames across the timeline with `ffmpeg`, transcribes the audio locally with `whisper.cpp`, and writes everything into one folder with a generated `README.md` as the entry point. You then just tell your agent to read that file.
-
-**Install** (macOS, needs [Homebrew](https://brew.sh) and `python3`):
-
-```bash
-git clone https://github.com/seanlu2006/vid-for-agents.git
-cd vid-for-agents && ./install.sh
-```
-
-The installer only does four things: `brew install`s missing dependencies (`ffmpeg`, `yt-dlp`, `whisper-cpp`, `opencc`), downloads a ~547 MB Whisper model to `~/.cache/whisper-models/`, symlinks `~/bin/vid` to the cloned repo, and *prints* (never writes) the PATH line if `~/bin` is not on your PATH. No `sudo`, no shell-rc edits, no remote scripts. Keep the cloned folder where it is — the symlink points at it.
-
-**Usage:**
-
-```bash
-vid ~/Downloads/demo.mp4                                    # local file
-vid "https://youtube.com/watch?v=XXXX" -l en -n 30          # YouTube, 30 frames
-vid "https://instagram.com/reel/XXXX/" -c chrome            # login-gated content
-vid demo.mp4 --no-frames                                    # transcript only
-```
-
-Output lands in `~/media-out/<title>-<timestamp>/` containing `README.md` (metadata + full transcript inline + a timestamped frame index), `frames/f001_00m03s.jpg`…, `transcript.txt`, `transcript.srt`, and — for downloads — `meta.json` and `source.mp4`.
-
-Flags: `-n/--frames N` (default 12), `-l/--lang CODE` (default `auto`), `-c/--cookies BROWSER`, `-o/--outdir DIR` (default `~/media-out`), `--model NAME` (default `large-v3-turbo-q5_0`), `--no-frames`, `--no-audio`, `--no-keep`, `-h/--help`.
-
-Reference timing: an 83-second 720p clip, 12 frames plus an English transcript, finishes in about 4.4s on an Apple M5. See the Known Limitations section above — sampling is not the same as watching, Threads is not supported, and Chinese transcripts need proofreading.
+What you download belongs to whoever made it. This tool is built for understanding things yourself, for study, and for keeping a record — not for reproducing and redistributing other people's work. Respect the terms of the platforms you pull from.
 
 ---
 
 ## License
 
-MIT — 見 [LICENSE](LICENSE)。
+MIT — see [LICENSE](LICENSE).
