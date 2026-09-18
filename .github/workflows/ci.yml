@@ -1,0 +1,20 @@
+name: Shell checks
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  shell:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        # 測試需要真的 ffmpeg；runner 映像不保證有，沒有才裝
+        run: |
+          command -v shellcheck >/dev/null || brew install shellcheck
+          command -v ffmpeg >/dev/null || brew install ffmpeg
+      - name: ShellCheck
+        run: shellcheck vid install.sh tests/test_vid.sh
+      - name: Shell tests
+        run: tests/test_vid.sh
