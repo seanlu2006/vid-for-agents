@@ -14,6 +14,7 @@
 #       --keep-video    保留原始影片檔（預設保留；用 --no-keep 刪掉省空間）
 #       --no-keep       處理完刪掉原始影片
 #       --model NAME    whisper 模型 (預設 large-v3-turbo-q5_0)
+#                       自訂模型可設 WHISPER_MODEL_SHA256 讓首次下載時驗證
 #   -h, --help          這段說明
 #
 # 輸出: <outdir>/<標題slug>-<時間戳>/
@@ -35,6 +36,9 @@ DO_AUDIO=1
 KEEP_VIDEO=1
 MODEL="large-v3-turbo-q5_0"
 MODEL_DIR="$HOME/.cache/whisper-models"
+MODEL_REVISION="5359861c739e955e79d9a303bcbc70fb988958b1"
+# Hugging Face LFS oid (SHA-256) for the default model at MODEL_REVISION.
+DEFAULT_MODEL_SHA256="394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2"
 
 die() { echo "❌ $*" >&2; exit 1; }
 info() { echo "→ $*" >&2; }
@@ -51,7 +55,7 @@ print(t or "video")
 '
 }
 
-[[ $# -eq 0 ]] && { sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
+[[ $# -eq 0 ]] && { sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
 
 # ── 吃參數的選項：缺參數/型別錯，在解析階段就擋下來 ──────────────────────
 # $1=選項名  $2=剩下的參數個數(含選項本身)  $3=參數值(可能不存在)
@@ -89,7 +93,7 @@ while [[ $# -gt 0 ]]; do
     --no-audio)   DO_AUDIO=0; shift ;;
     --keep-video) KEEP_VIDEO=1; shift ;;
     --no-keep)    KEEP_VIDEO=0; shift ;;
-    -h|--help)    sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)    sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*)           die "不認識的選項: $1" ;;
     *)            INPUT="$1"; shift ;;
   esac
@@ -113,11 +117,17 @@ STAMP=$(date +%Y%m%d-%H%M%S)
 #    都要清掉，別把整支影片留在 /var/folders。宣告在 TMPD 可能被建立之前，
 #    並用 ${TMPD:-} 以相容 set -u。
 TMPD=""
-cleanup() { [[ -n "${TMPD:-}" ]] && rm -rf "$TMPD"; return 0; }
+OUTDIR=""
+COMPLETED=0
+cleanup() {
+  [[ -n "${TMPD:-}" ]] && rm -rf "$TMPD"
+  # 中途失敗就把這次建立的輸出目錄整個收掉，不留半成品
+  [[ $COMPLETED -eq 0 && -n "${OUTDIR:-}" ]] && rm -rf "$OUTDIR"
+  return 0
+}
 trap cleanup EXIT
 
 # ── 1. 取得影片：URL 就下載，本機檔就複製路徑 ─────────────────────────────
-WORKDIR=""
 VIDEO=""
 META_JSON=""
 
@@ -163,33 +173,69 @@ else
   TITLE=$(slugify "$(basename "${INPUT%.*}")")
 fi
 
-OUTDIR="$OUTROOT/${TITLE}-${STAMP}"
-mkdir -p "$OUTDIR"
-[[ -n "$META_JSON" ]] && cp "$META_JSON" "$OUTDIR/meta.json"
-
 # ── 2. 基本資訊 ──────────────────────────────────────────────────────────
-DURATION=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$VIDEO" 2>/dev/null | cut -d. -f1)
-DURATION=${DURATION:-0}
-RES=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0:s=x "$VIDEO" 2>/dev/null || echo "?")
-HAS_AUDIO=$(ffprobe -v error -select_streams a -show_entries stream=index -of csv=p=0 "$VIDEO" 2>/dev/null | head -1)
-info "時長 ${DURATION}s / 解析度 ${RES}"
+DURATION_RAW=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$VIDEO" 2>/dev/null) ||
+  die "ffprobe 讀取影片時長失敗"
+[[ "$DURATION_RAW" =~ ^[0-9]+([.][0-9]+)?$ ]] ||
+  die "ffprobe 回傳無效的影片時長: $DURATION_RAW"
+DURATION="${DURATION_RAW%%.*}"
+RES=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0:s=x "$VIDEO" 2>/dev/null) ||
+  die "ffprobe 讀取影片解析度失敗"
+RES=$(printf '%s\n' "$RES" | head -1)
+# 空字串 = 沒有畫面串流（podcast、語音訊息），照樣做逐字稿
+[[ -z "$RES" || "$RES" =~ ^[0-9]+x[0-9]+$ ]] || die "ffprobe 回傳無效的影片解析度: $RES"
+
+# 抽影格要照「畫面串流」的長度，不是容器長度。
+# Reels 常見畫面 3 秒、配樂 10 秒，用容器長度會抽到畫面結束之後的空白時間點。
+VDUR="$DURATION_RAW"
+if [[ -n "$RES" ]]; then
+  VDUR_RAW=$(ffprobe -v error -select_streams v:0 -show_entries stream=duration -of csv=p=0 "$VIDEO" 2>/dev/null | head -1 || true)
+  # mkv/webm 常沒有串流長度（N/A），退回容器長度
+  [[ "$VDUR_RAW" =~ ^[0-9]+([.][0-9]+)?$ ]] && VDUR="$VDUR_RAW"
+fi
+HAS_AUDIO=$(ffprobe -v error -select_streams a -show_entries stream=index -of csv=p=0 "$VIDEO" 2>/dev/null) ||
+  die "ffprobe 讀取音軌資訊失敗"
+HAS_AUDIO=$(printf '%s\n' "$HAS_AUDIO" | head -1)
+info "時長 ${DURATION}s / 解析度 ${RES:-無畫面}"
+
+mkdir -p "$OUTROOT"
+OUTDIR="$OUTROOT/${TITLE}-${STAMP}"
+suffix=0
+while ! mkdir "$OUTDIR" 2>/dev/null; do
+  [[ -e "$OUTDIR" ]] || die "無法建立輸出目錄: $OUTDIR"
+  suffix=$((suffix + 1))
+  OUTDIR="$OUTROOT/${TITLE}-${STAMP}-${suffix}"
+done
+[[ -n "$META_JSON" ]] && cp "$META_JSON" "$OUTDIR/meta.json"
 
 # ── 3. 抽影格 ────────────────────────────────────────────────────────────
 FRAME_LIST=""
-if [[ $DO_FRAMES -eq 1 && $DURATION -gt 0 ]]; then
+FRAME_NOTE=""
+if [[ $DO_FRAMES -eq 1 && -z "$RES" ]]; then
+  FRAME_NOTE="（這個檔案沒有畫面）"
+elif [[ $DO_FRAMES -eq 1 ]] && python3 -c "import sys; sys.exit(0 if float('$VDUR') > 0 else 1)"; then
   mkdir -p "$OUTDIR/frames"
   info "抽 $FRAMES 張影格…"
+  SKIPPED=0
   i=1
   while [[ $i -le $FRAMES ]]; do
-    # 均勻取樣，避開頭尾黑畫面
-    T=$(python3 -c "print(round($DURATION*($i-0.5)/$FRAMES,2))")
+    # 在畫面串流長度內均勻取樣，取每段中點，避開頭尾黑畫面
+    T=$(python3 -c "print(round($VDUR*($i-0.5)/$FRAMES,2))")
     MM=$(python3 -c "print(f'{int($T)//60:02d}m{int($T)%60:02d}s')")
     OUT=$(printf "%s/frames/f%03d_%s.jpg" "$OUTDIR" "$i" "$MM")
-    ffmpeg -nostdin -loglevel error -ss "$T" -i "$VIDEO" \
-           -frames:v 1 -vf "scale='min(768,iw)':-2" -q:v 4 -y "$OUT" 2>/dev/null || true
-    [[ -f "$OUT" ]] && FRAME_LIST="${FRAME_LIST}- \`frames/$(basename "$OUT")\` (t=${MM})\n"
+    if ffmpeg -nostdin -loglevel error -ss "$T" -i "$VIDEO" \
+         -frames:v 1 -vf "scale='min(768,iw)':-2" -q:v 4 -y "$OUT" 2>/dev/null && [[ -s "$OUT" ]]; then
+      FRAME_LIST="${FRAME_LIST}- \`frames/$(basename "$OUT")\` (t=${MM})\n"
+    else
+      rm -f "$OUT"
+      SKIPPED=$((SKIPPED + 1))
+      echo "⚠️  第 ${i} 張影格（${MM}）抽取失敗，已跳過" >&2
+    fi
     i=$((i+1))
   done
+  if [[ $SKIPPED -gt 0 ]]; then
+    FRAME_NOTE="（${FRAMES} 張中有 ${SKIPPED} 張抽取失敗，已跳過）"
+  fi
 fi
 
 # ── 4. 逐字稿 ────────────────────────────────────────────────────────────
@@ -199,20 +245,39 @@ if [[ $DO_AUDIO -eq 1 && -n "$HAS_AUDIO" ]]; then
     TRANSCRIPT_NOTE="（跳過：找不到 whisper 執行檔，跑 brew install whisper-cpp）"
   else
     MODEL_FILE="$MODEL_DIR/ggml-${MODEL}.bin"
+    # checksum 只在下載當下驗一次；已存在的模型直接信任（每次重算 547 MB 要多花約 1 秒）
     if [[ ! -f "$MODEL_FILE" ]]; then
+      MODEL_SHA256="${WHISPER_MODEL_SHA256:-}"
+      if [[ "$MODEL" == "large-v3-turbo-q5_0" && -z "$MODEL_SHA256" ]]; then
+        MODEL_SHA256="$DEFAULT_MODEL_SHA256"
+      fi
+      [[ -z "$MODEL_SHA256" || "$MODEL_SHA256" =~ ^[[:xdigit:]]{64}$ ]] ||
+        die "WHISPER_MODEL_SHA256 必須是 64 位十六進位，收到: $MODEL_SHA256"
+
       mkdir -p "$MODEL_DIR"
       info "第一次使用，下載 whisper 模型 ggml-${MODEL}.bin（一次性，之後不用再下）…"
       curl -L --fail --progress-bar \
-        "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-${MODEL}.bin" \
-        -o "$MODEL_FILE.part" && mv "$MODEL_FILE.part" "$MODEL_FILE" \
-        || { rm -f "$MODEL_FILE.part"; die "模型下載失敗"; }
+        "https://huggingface.co/ggerganov/whisper.cpp/resolve/${MODEL_REVISION}/ggml-${MODEL}.bin" \
+        -o "$MODEL_FILE.part" || { rm -f "$MODEL_FILE.part"; die "模型下載失敗"; }
+      if [[ -n "$MODEL_SHA256" ]]; then
+        ACTUAL=$(shasum -a 256 "$MODEL_FILE.part" | awk '{print $1}')
+        if [[ "$ACTUAL" != "$MODEL_SHA256" ]]; then
+          rm -f "$MODEL_FILE.part"
+          die "模型 checksum 不符：預期 $MODEL_SHA256，實際 $ACTUAL"
+        fi
+      else
+        echo "⚠️  模型 $MODEL 沒有已知的 SHA-256，未驗證 checksum（可設 WHISPER_MODEL_SHA256）" >&2
+      fi
+      mv "$MODEL_FILE.part" "$MODEL_FILE"
     fi
 
     info "轉逐字稿中（本機跑，長片要等）…"
     ffmpeg -nostdin -loglevel error -i "$VIDEO" -ar 16000 -ac 1 -c:a pcm_s16le \
            -y "$OUTDIR/audio.wav" 2>/dev/null
 
-    WARGS=(-m "$MODEL_FILE" -f "$OUTDIR/audio.wav" -of "$OUTDIR/transcript" -otxt -osrt -pp)
+    # -mc 0：不沿用上文。長片（>15 分鐘）不加的話，whisper 容易卡進
+    #        「同一句重複幾百行」的幻覺迴圈
+    WARGS=(-m "$MODEL_FILE" -f "$OUTDIR/audio.wav" -of "$OUTDIR/transcript" -otxt -osrt -pp -mc 0)
     [[ "$LANG_CODE" != "auto" ]] && WARGS+=(-l "$LANG_CODE") || WARGS+=(-l auto)
 
     if "$WHISPER" "${WARGS[@]}" >/dev/null 2>&1; then
@@ -227,6 +292,17 @@ if [[ $DO_AUDIO -eq 1 && -n "$HAS_AUDIO" ]]; then
             rm -f "$f.tw"
           fi
         done
+      fi
+      # 安全網：同一句連續出現 ≥15 次，幾乎一定是幻覺迴圈
+      if [[ -f "$OUTDIR/transcript.srt" ]]; then
+        MAX_REPEAT=$(awk '
+          /^[0-9]+$/ || /-->/ || /^[[:space:]]*$/ { next }
+          { if ($0 == prev) run++; else run = 1; prev = $0; if (run > max) max = run }
+          END { print max + 0 }' "$OUTDIR/transcript.srt")
+        if [[ $MAX_REPEAT -ge 15 ]]; then
+          TRANSCRIPT_NOTE="（⚠️ 偵測到同一句連續重複 ${MAX_REPEAT} 次，可能是 whisper 幻覺，該段內容不可信）"
+          echo "⚠️  逐字稿有同一句連續重複 ${MAX_REPEAT} 次，可能是 whisper 幻覺" >&2
+        fi
       fi
     else
       TRANSCRIPT_NOTE="（whisper 執行失敗，audio.wav 留著讓你手動試）"
@@ -247,7 +323,7 @@ fi
   echo "# 影片內容包"
   echo ""
   echo "- 來源: \`$INPUT\`"
-  echo "- 時長: ${DURATION}s ｜ 解析度: ${RES}"
+  echo "- 時長: ${DURATION}s ｜ 解析度: ${RES:-無畫面}"
   echo "- 產生時間: $(date '+%Y-%m-%d %H:%M:%S')"
   echo ""
   if [[ -f "$OUTDIR/meta.json" ]]; then
@@ -280,7 +356,7 @@ PY
     echo "_無_"
   fi
   echo ""
-  echo "## 影格（用 Read 工具逐張看）"
+  echo "## 影格（用 Read 工具逐張看）$FRAME_NOTE"
   echo ""
   if [[ -n "$FRAME_LIST" ]]; then
     printf "%b" "$FRAME_LIST"
@@ -288,6 +364,7 @@ PY
     echo "_無_"
   fi
 } > "$OUTDIR/README.md"
+COMPLETED=1
 
 echo ""
 echo "✅ 完成 → $OUTDIR"

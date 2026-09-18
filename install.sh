@@ -5,6 +5,9 @@ set -euo pipefail
 MODEL="large-v3-turbo-q5_0"
 MODEL_DIR="$HOME/.cache/whisper-models"
 BIN_DIR="$HOME/bin"
+MODEL_REVISION="5359861c739e955e79d9a303bcbc70fb988958b1"
+# Hugging Face LFS oid (SHA-256) for the default model at MODEL_REVISION.
+DEFAULT_MODEL_SHA256="394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2"
 
 ok()   { echo "✅ $*"; }
 info() { echo "→  $*"; }
@@ -36,17 +39,26 @@ fi
 
 # 3. 語音模型
 MODEL_FILE="$MODEL_DIR/ggml-${MODEL}.bin"
-if [[ -f "$MODEL_FILE" ]]; then
-  ok "語音模型已存在 ($(du -h "$MODEL_FILE" | cut -f1))"
+verify_model() {
+  local actual
+  actual=$(shasum -a 256 "$1" | awk '{print $1}') || return 1
+  [[ "$actual" == "$DEFAULT_MODEL_SHA256" ]]
+}
+if [[ -f "$MODEL_FILE" ]] && verify_model "$MODEL_FILE"; then
+  ok "語音模型已存在且驗證通過 ($(du -h "$MODEL_FILE" | cut -f1))"
 else
+  [[ -f "$MODEL_FILE" ]] && info "既有模型 checksum 不符（可能下載不完整），重新下載"
   mkdir -p "$MODEL_DIR"
   info "下載語音模型 ggml-${MODEL}.bin（約 547 MB，一次性）…"
   curl -L --fail --progress-bar \
-    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-${MODEL}.bin" \
-    -o "$MODEL_FILE.part" \
-    && mv "$MODEL_FILE.part" "$MODEL_FILE" \
-    || { rm -f "$MODEL_FILE.part"; die "模型下載失敗"; }
-  ok "模型下載完成"
+    "https://huggingface.co/ggerganov/whisper.cpp/resolve/${MODEL_REVISION}/ggml-${MODEL}.bin" \
+    -o "$MODEL_FILE.part" || { rm -f "$MODEL_FILE.part"; die "模型下載失敗"; }
+  if ! verify_model "$MODEL_FILE.part"; then
+    rm -f "$MODEL_FILE.part"
+    die "模型下載後 checksum 驗證失敗"
+  fi
+  mv "$MODEL_FILE.part" "$MODEL_FILE"
+  ok "模型下載並驗證完成"
 fi
 
 # 4. 安裝指令
