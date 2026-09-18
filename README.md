@@ -44,7 +44,7 @@ cd vid-for-agents
 | Step | Detail |
 |---|---|
 | `brew install` what's missing | `ffmpeg`, `yt-dlp`, `whisper-cpp`, `opencc` — anything already installed is skipped |
-| Download the speech model | ~547 MB, one time, into `~/.cache/whisper-models/` |
+| Download and verify the speech model | ~547 MB, one time, into `~/.cache/whisper-models/`; the pinned upstream revision and SHA-256 are checked |
 | Create a symlink | `~/bin/vid` → the `vid` in your clone |
 | Check your PATH | if `~/bin` isn't on it, the installer **prints** the line to add and leaves you to run it |
 
@@ -178,7 +178,9 @@ vid "https://www.instagram.com/reel/XXXXXXXXXXX/" -c chrome
 
 The headings are Chinese — `影片內容包` is "video content pack", `逐字稿` is "transcript", `影格` is "frames". The shape is what matters, and every agent I've tried has read it without complaint.
 
-If Whisper fails, or the video has no audio track, a short Chinese note is appended to the `逐字稿` heading explaining why. A failed run also leaves `audio.wav` (16 kHz mono) in the folder so you can retry by hand.
+If Whisper fails, or the file has no audio track, a short Chinese note is appended to the `逐字稿` heading explaining why. A Whisper failure leaves `audio.wav` (16 kHz mono) in the folder so you can retry by hand. Any other failure midway, such as a model download that breaks, removes the half-built folder instead.
+
+Audio-only files work too: a podcast episode, a voice memo. There is no picture to sample, so you get the transcript, and the header reads `解析度: 無畫面` ("resolution: no picture"). If a single frame can't be extracted, it's skipped with a warning and the run carries on. The `影格` heading then says how many were lost.
 
 ### Options
 
@@ -198,9 +200,9 @@ If Whisper fails, or the video has no audio track, a short Chinese note is appen
 A few things worth knowing:
 
 - `--keep-video` and `--no-keep` **only apply to videos downloaded from a URL**. On a local file both are no-ops; `vid` never modifies or deletes your own file.
-- `--model` is interpolated into `ggml-<NAME>.bin` and fetched from [huggingface.co/ggerganov/whisper.cpp](https://huggingface.co/ggerganov/whisper.cpp). For speed try `base` or `small`; for accuracy try `large-v3`. That repo has the full list.
+- `--model` is interpolated into `ggml-<NAME>.bin` and fetched from a pinned revision of [huggingface.co/ggerganov/whisper.cpp](https://huggingface.co/ggerganov/whisper.cpp). The checksum is checked once, at download time: the default model against its upstream SHA-256, a custom model against `WHISPER_MODEL_SHA256` if you set it. Without that variable a custom model still downloads, with a warning that it went unverified. A model already on disk is trusted and never re-hashed. Hashing 547 MB on every run would cost about a second each time.
 - `-c` is passed straight through to `yt-dlp --cookies-from-browser`, so anything `yt-dlp` supports works, not just the four listed above.
-- Output directories are named `<title slug>-<YYYYMMDD-HHMMSS>`. The slug keeps ASCII alphanumerics and Han characters (U+4E00–U+9FFF), collapses everything else into a single `-`, and is cut off at 50 characters. Note that this drops Japanese kana, Hangul, Cyrillic, and accented Latin: `アニメの作り方` becomes `作-方`, and a title made only of such characters falls back to `video`. The timestamp means two runs never overwrite each other.
+- Output directories are named `<title slug>-<YYYYMMDD-HHMMSS>`. The slug keeps ASCII alphanumerics and Han characters (U+4E00–U+9FFF), collapses everything else into a single `-`, and is cut off at 50 characters. Note that this drops Japanese kana, Hangul, Cyrillic, and accented Latin: `アニメの作り方` becomes `作-方`, and a title made only of such characters falls back to `video`. If two runs start in the same second, an exclusive numeric suffix is added rather than reusing an existing directory.
 
 ---
 
@@ -265,7 +267,7 @@ input ─┬─ URL ──────────► yt-dlp ──► video fil
 
 ### The decisions behind each stage
 
-**Sampling.** Frame *i* is taken at `t = duration × (i − 0.5) / N` — the midpoint of each equal slice rather than its edge, which sidesteps the black frames and transitions that tend to sit at the very beginning and end. Frames are scaled to 768 px wide (never upscaled beyond their original width) at JPEG quality `-q:v 4`. That size sits near the processing resolution of most vision models; anything larger just wastes tokens.
+**Sampling.** Frame *i* is taken at `t = video duration × (i − 0.5) / N` — the midpoint of each equal slice rather than its edge, which sidesteps the black frames and transitions that tend to sit at the very beginning and end. "Video duration" means the video stream, not the container. Reels often pair a 3-second clip with a 10-second soundtrack, and sampling across the container would put most frames after the picture has already ended. Frames are scaled to 768 px wide (never upscaled beyond their original width) at JPEG quality `-q:v 4`. That size sits near the processing resolution of most vision models; anything larger just wastes tokens.
 
 **Local Whisper rather than a cloud API**, for three reasons:
 
@@ -301,9 +303,21 @@ Output is 204 KB in total. That 4.43s covers the whole pipeline — frame extrac
 
 4. **Chinese transcripts contain errors.** Whisper is noticeably weaker on Chinese proper nouns, names, and passages that mix in English, and `opencc` only fixes characters, not misrecognition. Treat the output as a draft, not as something to quote. Without `opencc` installed, the output stays in Simplified.
 
-5. **The interface is in Traditional Chinese.** `vid --help`, the progress lines, the error messages, and the section headings of the generated `README.md` are all in Chinese. The flags are in English and agents read the output fine, but nothing else is translated yet.
+5. **Long videos can send Whisper into a loop.** On recordings longer than about 15 minutes, Whisper sometimes gets stuck and repeats one sentence for hundreds of lines. It happened on 2 of the 8 long tutorial videos I ran. `vid` passes `-mc 0`, so each segment is decoded without the previous text as context, and that fixed both. As a backstop it also scans the transcript: if any line repeats 15 or more times in a row, the `逐字稿` heading gets a warning. Treat that stretch as unreliable.
 
-6. **Only tested on macOS.** It's all standard POSIX tooling, so Linux should work if you swap `brew` for `apt` or `pacman`, but I haven't verified that, and `install.sh` refuses to run anywhere other than macOS. Windows is untested.
+6. **The interface is in Traditional Chinese.** `vid --help`, the progress lines, the error messages, and the section headings of the generated `README.md` are all in Chinese. The flags are in English and agents read the output fine, but nothing else is translated yet.
+
+7. **Only tested on macOS.** It's all standard POSIX tooling, so Linux should work if you swap `brew` for `apt` or `pacman`, but I haven't verified that, and `install.sh` refuses to run anywhere other than macOS. Windows is untested.
+
+---
+
+## Development
+
+```bash
+tests/test_vid.sh
+```
+
+The tests run the real `ffmpeg` against generated clips and swap in stand-ins for `whisper-cli` and `curl`, so they finish in seconds and never download the model. They cover the cases that have broken before: audio-only input, audio longer than the picture, custom models without a checksum, a wrong checksum, a failed download, and the repeated-line check. CI runs ShellCheck and the same script on every push.
 
 ---
 
