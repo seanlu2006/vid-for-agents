@@ -263,7 +263,7 @@ if [[ $DO_AUDIO -eq 1 && -n "$HAS_AUDIO" ]]; then
         ACTUAL=$(shasum -a 256 "$MODEL_FILE.part" | awk '{print $1}')
         if [[ "$ACTUAL" != "$MODEL_SHA256" ]]; then
           rm -f "$MODEL_FILE.part"
-          die "模型 checksum 不符：預期 $MODEL_SHA256，實際 $ACTUAL"
+          die "模型 checksum 不符：預期 ${MODEL_SHA256}，實際 ${ACTUAL}"
         fi
       else
         echo "⚠️  模型 $MODEL 沒有已知的 SHA-256，未驗證 checksum（可設 WHISPER_MODEL_SHA256）" >&2

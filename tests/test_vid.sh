@@ -134,4 +134,17 @@ D=$(only_outdir "$TMPD/out9")
 grep -q "連續重複 20 次" "$D/README.md" || fail "README 應該有重複警告"
 pass "偵測幻覺重複：README 加警告"
 
+# 10. 變數後面不能直接接中文：非 UTF-8 locale（例如 CI）的 bash 會把
+#     中文的位元組當成變數名的一部分，觸發 unbound variable
+BAD=$(python3 - "$VID" "$ROOT/install.sh" <<'PY'
+import re, sys
+for f in sys.argv[1:]:
+    for i, line in enumerate(open(f, encoding="utf-8"), 1):
+        if re.search(r'\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7f]', line):
+            print(f"{f}:{i}: {line.strip()}")
+PY
+)
+[[ -z "$BAD" ]] || fail "變數後面直接接非 ASCII 字元，請改成 \${VAR}：$BAD"
+pass "變數與中文之間都用大括號隔開"
+
 echo "全部 $PASS 項通過"
