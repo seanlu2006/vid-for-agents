@@ -44,9 +44,9 @@ cd vid-for-agents
 | Step | Detail |
 |---|---|
 | `brew install` what's missing | `ffmpeg`, `yt-dlp`, `whisper-cpp`, `opencc` — anything already installed is skipped |
-| Download and verify the speech model | ~547 MB, one time, into `~/.cache/whisper-models/`; the pinned upstream revision and SHA-256 are checked |
+| Download and verify the models | the ~547 MB speech model and the ~0.9 MB Silero VAD model, one time, into `~/.cache/whisper-models/`; pinned upstream revisions and SHA-256 are checked |
 | Create a symlink | `~/bin/vid` → the `vid` in your clone |
-| Check your PATH | if `~/bin` isn't on it, the installer **prints** the line to add and leaves you to run it |
+| Check your PATH and `swiftc` | if `~/bin` isn't on it, the installer **prints** the line to add and leaves you to run it; if `swiftc` is missing, it says OCR will be skipped and how to get it |
 
 It doesn't edit your `.zshrc` or `.bashrc`, doesn't use `sudo`, and doesn't pipe a remote script into a shell. Step 3 is a symlink, so don't delete or move the cloned folder afterwards — `vid` points back into it.
 
@@ -70,6 +70,7 @@ No need to fetch the speech model by hand — `vid` downloads it the first time 
 | `yt-dlp` | downloading videos and post text | only needed for URLs; local files never touch it |
 | `whisper-cpp` | local speech-to-text | transcript skipped, frames still extracted |
 | `opencc` | Simplified → Traditional Chinese | Chinese transcripts stay in Simplified |
+| `swiftc` (Xcode Command Line Tools) | reading on-screen text with macOS Vision | OCR skipped, everything else runs |
 
 ---
 
@@ -106,6 +107,7 @@ What you get:
 │   ├── f002_00m10s.jpg
 │   ├── …
 │   └── f012_01m19s.jpg
+├── ocr.json           text found on each frame (macOS)
 ├── transcript.txt     plain text
 └── transcript.srt     with timecodes
 ```
@@ -182,6 +184,8 @@ If Whisper fails, or the file has no audio track, a short Chinese note is append
 
 Audio-only files work too: a podcast episode, a voice memo. There is no picture to sample, so you get the transcript, and the header reads `解析度: 無畫面` ("resolution: no picture"). If a single frame can't be extracted, it's skipped with a warning and the run carries on. The `影格` heading then says how many were lost.
 
+On macOS, `vid` also reads the text on every frame: burned-in captions, title cards, slide bullets. It goes under each frame in the generated README, so the agent learns what the screen says without opening a single image. Burned-in captions tend to stay put for several frames, so when a frame shows exactly the same text as the one before it, the README says `（同上一張）` ("same as previous") instead of repeating it. The raw results are kept in `ocr.json`.
+
 ### Options
 
 | Option | What it does | Default |
@@ -193,6 +197,8 @@ Audio-only files work too: a podcast episode, a voice memo. There is no picture 
 | `--model NAME` | Whisper model | `large-v3-turbo-q5_0` |
 | `--no-frames` | transcript only | does both |
 | `--no-audio` | frames only | does both |
+| `--no-ocr` | don't read on-screen text | reads it on macOS |
+| `--no-vad` | send the whole audio track to Whisper, silence included | filters silence first |
 | `--keep-video` | keep the downloaded video | already the default |
 | `--no-keep` | delete the downloaded video when done | keeps it |
 | `-h, --help` | usage | — |
@@ -255,19 +261,23 @@ input ─┬─ URL ──────────► yt-dlp ──► video fil
               │                                   │
      evenly sampled frames               16 kHz mono WAV
      (JPEG, ≤768 px wide)                         │
-              │              whisper.cpp (local; Metal on Apple Silicon)
+              │                     Silero VAD (drops silence)
+     macOS Vision OCR                             │
+     (text on screen)        whisper.cpp (local; Metal on Apple Silicon)
               │                                   │
               │                     transcript.txt / transcript.srt
               │                                   │
               │              opencc s2twp (Simplified → Traditional Chinese)
               └─────────────────┬─────────────────┘
                                 │
-        generated README.md (metadata + full transcript + frame index)
+   generated README.md (metadata + full transcript + frames with their text)
 ```
 
 ### The decisions behind each stage
 
 **Sampling.** Frame *i* is taken at `t = video duration × (i − 0.5) / N` — the midpoint of each equal slice rather than its edge, which sidesteps the black frames and transitions that tend to sit at the very beginning and end. "Video duration" means the video stream, not the container. Reels often pair a 3-second clip with a 10-second soundtrack, and sampling across the container would put most frames after the picture has already ended. Frames are scaled to 768 px wide (never upscaled beyond their original width) at JPEG quality `-q:v 4`. That size sits near the processing resolution of most vision models; anything larger just wastes tokens.
+
+**On-screen text.** Apple's Vision framework ships with macOS, so OCR needs no download and no extra package. The Swift code that calls it is embedded in `vid` and compiled once into `~/.cache/vid/` the first time it's needed, which keeps the script a single file. Recognition languages are pinned to Traditional Chinese, then English, instead of being left to auto-detect. On a 5-minute trading tutorial, 12 frames came back as 118 lines of text (1,286 characters), and those lines included the step-by-step rules written on the slides. For comparison, opening 12 images would cost the agent far more context than that.
 
 **Local Whisper rather than a cloud API**, for three reasons:
 
@@ -295,7 +305,7 @@ Output is 204 KB in total. That 4.43s covers the whole pipeline — frame extrac
 
 ## Known limitations
 
-1. **This is sampling, not watching.** The agent gets N stills. Twelve frames of a short clip is roughly equivalent to having seen it, but **fast-cut title cards, the details within a continuous action, and frame-by-frame animation will be missed**. For that kind of video, push `-n` above 30, or accept that the transcript is the primary source.
+1. **This is sampling, not watching.** The agent gets N stills. Twelve frames of a short clip is roughly equivalent to having seen it, but **fast-cut title cards, the details within a continuous action, and frame-by-frame animation will be missed**. For that kind of video, push `-n` above 30, or accept that the transcript is the primary source. OCR reads the text on the frames that were sampled; it can't recover a card that fell between two of them.
 
 2. **Threads doesn't work.** `yt-dlp` has no Threads extractor. `vid` falls back to the generic extractor and tries to pull `og:video` from the page, but the success rate is low — don't build on it.
 
@@ -303,11 +313,13 @@ Output is 204 KB in total. That 4.43s covers the whole pipeline — frame extrac
 
 4. **Chinese transcripts contain errors.** Whisper is noticeably weaker on Chinese proper nouns, names, and passages that mix in English, and `opencc` only fixes characters, not misrecognition. Treat the output as a draft, not as something to quote. Without `opencc` installed, the output stays in Simplified.
 
-5. **Long videos can send Whisper into a loop.** On recordings longer than about 15 minutes, Whisper sometimes gets stuck and repeats one sentence for hundreds of lines. It happened on 2 of the 8 long tutorial videos I ran. `vid` passes `-mc 0`, so each segment is decoded without the previous text as context, and that fixed both. As a backstop it also scans the transcript: if any line repeats 15 or more times in a row, the `逐字稿` heading gets a warning. Treat that stretch as unreliable.
+5. **Long videos can send Whisper into a loop.** On recordings longer than about 15 minutes, Whisper sometimes gets stuck and repeats one sentence for hundreds of lines. It happened on 2 of the 8 long tutorial videos I ran. `vid` passes `-mc 0`, so each segment is decoded without the previous text as context, and it runs Silero VAD first, so silent and music-only stretches never reach Whisper. I reran those two videos (21 and 23 minutes) with each setting. Either one stops the loop on its own. Together they also cut transcription time by about a quarter on an M5 (32 → 24 s and 34 → 25 s), the amount of text stays within 1%, and the timestamps still line up with the original video. As a backstop it also scans the transcript: if any line repeats 15 or more times in a row, the `逐字稿` heading gets a warning. Treat that stretch as unreliable.
 
-6. **The interface is in Traditional Chinese.** `vid --help`, the progress lines, the error messages, and the section headings of the generated `README.md` are all in Chinese. The flags are in English and agents read the output fine, but nothing else is translated yet.
+6. **OCR misreads the odd character and mixes columns.** Expect single-character slips (`的` came back as `約` in one test). Lines are ordered top to bottom, so a slide with text on the left and a labelled chart on the right comes out interleaved. OCR only runs on macOS; elsewhere it's skipped.
 
-7. **Only tested on macOS.** It's all standard POSIX tooling, so Linux should work if you swap `brew` for `apt` or `pacman`, but I haven't verified that, and `install.sh` refuses to run anywhere other than macOS. Windows is untested.
+7. **The interface is in Traditional Chinese.** `vid --help`, the progress lines, the error messages, and the section headings of the generated `README.md` are all in Chinese. The flags are in English and agents read the output fine, but nothing else is translated yet.
+
+8. **Only tested on macOS.** It's all standard POSIX tooling, so Linux should work if you swap `brew` for `apt` or `pacman`, but I haven't verified that, and `install.sh` refuses to run anywhere other than macOS. Windows is untested.
 
 ---
 
@@ -317,7 +329,7 @@ Output is 204 KB in total. That 4.43s covers the whole pipeline — frame extrac
 tests/test_vid.sh
 ```
 
-The tests run the real `ffmpeg` against generated clips and swap in stand-ins for `whisper-cli` and `curl`, so they finish in seconds and never download the model. They cover the cases that have broken before: audio-only input, audio longer than the picture, custom models without a checksum, a wrong checksum, a failed download, and the repeated-line check. CI runs ShellCheck and the same script on every push.
+The tests run the real `ffmpeg` against generated clips and swap in stand-ins for `whisper-cli` and `curl`, so they finish in seconds and never download the model. They cover the cases that have broken before: audio-only input, audio longer than the picture, custom models without a checksum, a wrong checksum, a failed download, the repeated-line check, VAD and its fallbacks, and a non-UTF-8 locale. The OCR tests are the exception to the stand-ins: they draw caption cards, turn them into a video, and run real Vision on it, so they need macOS with `swiftc`. CI runs ShellCheck and the same script on every push, with `VID_REQUIRE_OCR=1` so the OCR tests can't be skipped quietly.
 
 ---
 
