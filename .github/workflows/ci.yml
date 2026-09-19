@@ -17,4 +17,7 @@ jobs:
       - name: ShellCheck
         run: shellcheck vid install.sh tests/test_vid.sh
       - name: Shell tests
+        # macOS runner 一定要跑到 OCR 測試，缺 swiftc 就算失敗
+        env:
+          VID_REQUIRE_OCR: "1"
         run: tests/test_vid.sh

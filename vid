@@ -11,6 +11,8 @@
 #   -o, --outdir DIR    輸出根目錄 (預設 ~/media-out)
 #       --no-frames     不抽影格（只要逐字稿）
 #       --no-audio      不轉逐字稿（只要影格）
+#       --no-ocr        不辨識畫面上的文字（macOS 才有，預設開）
+#       --no-vad        whisper 不用 VAD 過濾靜音段（預設開）
 #       --keep-video    保留原始影片檔（預設保留；用 --no-keep 刪掉省空間）
 #       --no-keep       處理完刪掉原始影片
 #       --model NAME    whisper 模型 (預設 large-v3-turbo-q5_0)
@@ -18,7 +20,7 @@
 #   -h, --help          這段說明
 #
 # 輸出: <outdir>/<標題slug>-<時間戳>/
-#   ├── README.md      ← 給 Claude 讀的入口（含 meta + 逐字稿全文 + 影格清單）
+#   ├── README.md      ← 給 Claude 讀的入口（含 meta + 逐字稿全文 + 影格清單與畫面文字）
 #   ├── meta.json      ← yt-dlp 抓到的原始 metadata
 #   ├── frames/        ← f001.jpg ... 依時間排序，檔名含秒數
 #   ├── transcript.txt ← 純文字逐字稿
@@ -26,6 +28,9 @@
 #   └── source.*       ← 原始影片
 
 set -euo pipefail
+# 所有 python3 呼叫的輸入輸出一律用 UTF-8。不設的話，在非 UTF-8 locale
+# （例如 CI、LANG=C 的伺服器）印中文標題、檔名、OCR 文字會直接 UnicodeEncodeError
+export PYTHONIOENCODING=utf-8
 
 FRAMES=12
 LANG_CODE="auto"
@@ -33,9 +38,16 @@ COOKIES=""
 OUTROOT="$HOME/media-out"
 DO_FRAMES=1
 DO_AUDIO=1
+DO_OCR=1
+DO_VAD=1
 KEEP_VIDEO=1
 MODEL="large-v3-turbo-q5_0"
 MODEL_DIR="$HOME/.cache/whisper-models"
+VID_CACHE="$HOME/.cache/vid"
+# Silero VAD（whisper.cpp 官方轉的 ggml 版），版本與 SHA-256 取自 HF API
+VAD_MODEL="silero-v6.2.0"
+VAD_REVISION="9ffd54a1e1ee413ddf265af9913beaf518d1639b"
+VAD_SHA256="2aa269b785eeb53a82983a20501ddf7c1d9c48e33ab63a41391ac6c9f7fb6987"
 MODEL_REVISION="5359861c739e955e79d9a303bcbc70fb988958b1"
 # Hugging Face LFS oid (SHA-256) for the default model at MODEL_REVISION.
 DEFAULT_MODEL_SHA256="394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2"
@@ -55,7 +67,7 @@ print(t or "video")
 '
 }
 
-[[ $# -eq 0 ]] && { sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
+[[ $# -eq 0 ]] && { sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
 
 # ── 吃參數的選項：缺參數/型別錯，在解析階段就擋下來 ──────────────────────
 # $1=選項名  $2=剩下的參數個數(含選項本身)  $3=參數值(可能不存在)
@@ -91,9 +103,11 @@ while [[ $# -gt 0 ]]; do
       MODEL="$2"; shift 2 ;;
     --no-frames)  DO_FRAMES=0; shift ;;
     --no-audio)   DO_AUDIO=0; shift ;;
+    --no-ocr)     DO_OCR=0; shift ;;
+    --no-vad)     DO_VAD=0; shift ;;
     --keep-video) KEEP_VIDEO=1; shift ;;
     --no-keep)    KEEP_VIDEO=0; shift ;;
-    -h|--help)    sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)    sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*)           die "不認識的選項: $1" ;;
     *)            INPUT="$1"; shift ;;
   esac
@@ -160,7 +174,7 @@ if [[ "$INPUT" =~ ^https?:// ]]; then
   RAW_TITLE=$(python3 -c "
 import json,sys
 try:
-    d=json.load(open(sys.argv[1]))
+    d=json.load(open(sys.argv[1], encoding='utf-8'))
     t=d.get('title') or d.get('id') or 'video'
 except Exception:
     t='video'
@@ -238,6 +252,80 @@ elif [[ $DO_FRAMES -eq 1 ]] && python3 -c "import sys; sys.exit(0 if float('$VDU
   fi
 fi
 
+# ── 3b. 畫面文字 OCR（macOS Vision）──────────────────────────────────────
+# Reels 常把字幕、重點字卡直接燒在畫面上。先 OCR 成文字附在影格清單，
+# agent 讀一次文字就知道畫面寫什麼，不用每張圖都打開看。
+# Swift 原始碼內嵌在這裡，第一次用時編譯並快取，vid 維持單一檔案、零額外套件。
+OCR_NOTE=""
+OCR_JSON=""
+build_ocr() {
+  local src hash bin
+  src=$(cat <<'SWIFT'
+import Foundation
+import Vision
+
+// 用法: vid-ocr <圖1> [圖2 ...]
+// 輸出: JSON 陣列 [{"file": 路徑, "lines": [由上到下、由左到右的文字列]}]
+var out: [[String: Any]] = []
+for path in CommandLine.arguments.dropFirst() {
+    let req = VNRecognizeTextRequest()
+    req.recognitionLevel = .accurate
+    req.usesLanguageCorrection = true
+    // 寫死繁中優先：讓系統自動判斷語言有中英混排出亂碼的回報
+    req.recognitionLanguages = ["zh-Hant", "en-US"]
+    var lines: [String] = []
+    do {
+        try VNImageRequestHandler(url: URL(fileURLWithPath: path)).perform([req])
+        let obs = (req.results ?? []).sorted {
+            // Vision 座標原點在左下：y 大的在上面
+            abs($0.boundingBox.midY - $1.boundingBox.midY) > 0.02
+                ? $0.boundingBox.midY > $1.boundingBox.midY
+                : $0.boundingBox.minX < $1.boundingBox.minX
+        }
+        for o in obs {
+            guard let c = o.topCandidates(1).first, c.confidence >= 0.3 else { continue }
+            let t = c.string.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !t.isEmpty { lines.append(t) }
+        }
+    } catch {
+        FileHandle.standardError.write("OCR failed: \(path)\n".data(using: .utf8)!)
+    }
+    out.append(["file": path, "lines": lines])
+}
+let data = try JSONSerialization.data(withJSONObject: out, options: [])
+FileHandle.standardOutput.write(data)
+SWIFT
+)
+  hash=$(printf '%s' "$src" | shasum -a 256 | cut -c1-12)
+  bin="$VID_CACHE/vid-ocr-$hash"
+  if [[ ! -x "$bin" ]]; then
+    mkdir -p "$VID_CACHE"
+    printf '%s\n' "$src" > "$VID_CACHE/vid-ocr-$hash.swift"
+    info "第一次使用 OCR，編譯中（只需一次）…"
+    swiftc -O "$VID_CACHE/vid-ocr-$hash.swift" -o "$bin.tmp" >/dev/null 2>&1 || { rm -f "$bin.tmp"; return 1; }
+    mv "$bin.tmp" "$bin"
+  fi
+  printf '%s' "$bin"
+}
+
+if [[ $DO_OCR -eq 1 && -n "$FRAME_LIST" ]]; then
+  if [[ "$(uname -s)" != "Darwin" ]] || ! command -v swiftc >/dev/null 2>&1; then
+    OCR_NOTE="（畫面文字：跳過，需要 macOS 與 Xcode Command Line Tools）"
+  elif OCR_BIN=$(build_ocr); then
+    info "辨識畫面文字…"
+    if OCR_JSON=$("$OCR_BIN" "$OUTDIR"/frames/*.jpg 2>/dev/null); then
+      printf '%s' "$OCR_JSON" > "$OUTDIR/ocr.json"
+    else
+      OCR_JSON=""
+      OCR_NOTE="（畫面文字：OCR 執行失敗，已跳過）"
+      echo "⚠️  OCR 執行失敗，已跳過" >&2
+    fi
+  else
+    OCR_NOTE="（畫面文字：OCR 編譯失敗，已跳過）"
+    echo "⚠️  OCR 編譯失敗（swiftc），已跳過" >&2
+  fi
+fi
+
 # ── 4. 逐字稿 ────────────────────────────────────────────────────────────
 TRANSCRIPT_NOTE=""
 if [[ $DO_AUDIO -eq 1 && -n "$HAS_AUDIO" ]]; then
@@ -279,6 +367,30 @@ if [[ $DO_AUDIO -eq 1 && -n "$HAS_AUDIO" ]]; then
     #        「同一句重複幾百行」的幻覺迴圈
     WARGS=(-m "$MODEL_FILE" -f "$OUTDIR/audio.wav" -of "$OUTDIR/transcript" -otxt -osrt -pp -mc 0)
     [[ "$LANG_CODE" != "auto" ]] && WARGS+=(-l "$LANG_CODE") || WARGS+=(-l auto)
+
+    # VAD：先用 Silero 找出有人講話的段落，只把那些段落丟給 whisper。
+    # 靜音、純音樂段是幻覺迴圈最常發生的地方。VAD 只是加強，任何一步失敗都照常轉錄。
+    if [[ $DO_VAD -eq 1 ]]; then
+      VAD_FILE="$MODEL_DIR/ggml-${VAD_MODEL}.bin"
+      if ! "$WHISPER" --help 2>&1 | grep -q -- '--vad'; then
+        echo "⚠️  這版 whisper 不支援 --vad，略過（brew upgrade whisper-cpp 可升級）" >&2
+      else
+        if [[ ! -f "$VAD_FILE" ]]; then
+          mkdir -p "$MODEL_DIR"
+          info "第一次使用 VAD，下載 ggml-${VAD_MODEL}.bin（約 0.9 MB）…"
+          if curl -L --fail -sS \
+               "https://huggingface.co/ggml-org/whisper-vad/resolve/${VAD_REVISION}/ggml-${VAD_MODEL}.bin" \
+               -o "$VAD_FILE.part" \
+             && [[ "$(shasum -a 256 "$VAD_FILE.part" | awk '{print $1}')" == "$VAD_SHA256" ]]; then
+            mv "$VAD_FILE.part" "$VAD_FILE"
+          else
+            rm -f "$VAD_FILE.part"
+            echo "⚠️  VAD 模型下載或驗證失敗，這次不用 VAD" >&2
+          fi
+        fi
+        [[ -f "$VAD_FILE" ]] && WARGS+=(--vad -vm "$VAD_FILE")
+      fi
+    fi
 
     if "$WHISPER" "${WARGS[@]}" >/dev/null 2>&1; then
       rm -f "$OUTDIR/audio.wav"
@@ -331,7 +443,7 @@ fi
     echo ""
     python3 - "$OUTDIR/meta.json" <<'PY'
 import json,sys
-d=json.load(open(sys.argv[1]))
+d=json.load(open(sys.argv[1], encoding="utf-8"))
 for k in ('title','uploader','channel','upload_date','duration','view_count','like_count','comment_count','webpage_url'):
     if d.get(k) not in (None,''):
         print(f"- **{k}**: {d[k]}")
@@ -356,9 +468,36 @@ PY
     echo "_無_"
   fi
   echo ""
-  echo "## 影格（用 Read 工具逐張看）$FRAME_NOTE"
+  if [[ -n "$OCR_JSON" ]]; then
+    echo "## 影格（畫面上的文字已辨識，附在各張下方；要看畫面再用 Read 工具開圖）${FRAME_NOTE}"
+  else
+    echo "## 影格（用 Read 工具逐張看）${FRAME_NOTE}${OCR_NOTE}"
+  fi
   echo ""
-  if [[ -n "$FRAME_LIST" ]]; then
+  if [[ -n "$FRAME_LIST" && -n "$OCR_JSON" ]]; then
+    # 每張影格下面附 OCR 結果；跟上一張一模一樣就不重複貼（燒錄字幕常連續好幾張相同）
+    # shellcheck disable=SC2016  # 單引號裡是 Python 程式碼，本來就不該被 shell 展開
+    printf "%b" "$FRAME_LIST" | python3 -c '
+import json, os, sys
+ocr = {os.path.basename(d["file"]): d["lines"] for d in json.load(open(sys.argv[1], encoding="utf-8"))}
+prev = None
+for line in sys.stdin.read().splitlines():
+    print(line)
+    name = line.split("`")[1].split("/")[-1] if "`" in line else ""
+    lines = ocr.get(name)
+    if lines is None:
+        continue
+    if not lines:
+        print("  - 畫面文字：（無）")
+    elif lines == prev:
+        print("  - 畫面文字：（同上一張）")
+    else:
+        print("  - 畫面文字：")
+        for t in lines:
+            print("    > " + t)
+    prev = lines
+' "$OUTDIR/ocr.json"
+  elif [[ -n "$FRAME_LIST" ]]; then
     printf "%b" "$FRAME_LIST"
   else
     echo "_無_"
