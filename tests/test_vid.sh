@@ -23,6 +23,8 @@ if [[ "${1:-}" == "--help" ]]; then
   exit 0
 fi
 echo "$*" > "$FAKE_WHISPER_ARGS"
+# FAKE_WHISPER_VAD_FAIL=1：模擬 VAD 模型壞掉，帶 --vad 就執行失敗
+if [[ "${FAKE_WHISPER_VAD_FAIL:-}" == "1" && " $* " == *" --vad "* ]]; then exit 1; fi
 of=""; while [[ $# -gt 0 ]]; do [[ "$1" == "-of" ]] && of="$2"; shift; done
 if [[ "${FAKE_WHISPER_MODE:-}" == "repeat" ]]; then
   for i in $(seq 1 20); do printf '%d\n00:00:%02d,000 --> 00:00:%02d,500\nthank you\n\n' "$i" "$i" "$i"; done > "$of.srt"
@@ -183,6 +185,17 @@ grep -q "VAD 模型下載或驗證失敗" "$TMPD/stderr" || fail "應該警告 V
   || fail "VAD 驗證失敗不該留下檔案"
 pass "VAD 模型驗證失敗：略過並照常轉錄"
 
+# 14b. VAD 模型在但 whisper 帶 --vad 執行失敗（檔案壞掉、版本讀不了）
+#      → 拿掉 VAD 重跑，逐字稿不能消失
+H=$(new_home vad5); with_model "$H" large-v3-turbo-q5_0; with_model "$H" silero-v6.2.0
+FAKE_WHISPER_VAD_FAIL=1 run_vid "$H" "$TMPD/audio-only.m4a" -o "$TMPD/out14b" || fail "VAD 執行失敗應該重跑成功"
+D=$(only_outdir "$TMPD/out14b")
+[[ -s "$D/transcript.txt" ]] || fail "拿掉 VAD 重跑後應該有逐字稿"
+if grep -q -- "--vad" "$FAKE_WHISPER_ARGS"; then fail "重跑那次不該再帶 --vad"; fi
+grep -q "改成不用 VAD 重跑" "$TMPD/stderr" || fail "應該警告改成不用 VAD 重跑"
+if grep -q "whisper 執行失敗" "$D/README.md"; then fail "重跑成功就不該標示 whisper 執行失敗"; fi
+pass "VAD 執行失敗：拿掉 VAD 重跑"
+
 # 15–17. 畫面文字 OCR（macOS Vision）。需要 macOS + swiftc；
 #        CI 設 VID_REQUIRE_OCR=1，缺工具就算失敗，避免測試被默默跳過
 if [[ "$(uname -s)" == "Darwin" ]] && command -v swiftc >/dev/null 2>&1; then
@@ -243,6 +256,16 @@ SWIFT
   D=$(only_outdir "$TMPD/out18")
   grep -q "回測支撐區才進場" "$D/README.md" || fail "非 UTF-8 locale 下 README 應有中文畫面文字"
   pass "非 UTF-8 locale：中文檔名與 OCR 文字正常"
+
+  # 19. 完全沒有文字的影格寫「（無）」，不合併成「同上一張」：
+  #     「（無）」比「（同上一張）」短，而且 agent 不用往回找
+  ffmpeg -nostdin -loglevel error -f lavfi -i "color=c=gray:s=640x360:d=3" -r 30 -c:v libx264 -pix_fmt yuv420p -y "$TMPD/blank.mp4"
+  H=$(new_home ocr)
+  run_vid "$H" "$TMPD/blank.mp4" -n 3 --no-audio -o "$TMPD/out19" || fail "空白畫面應該成功"
+  D=$(only_outdir "$TMPD/out19")
+  [[ $(grep -c "畫面文字：（無）" "$D/README.md") -eq 3 ]] || fail "3 張空白影格都應寫（無）"
+  if grep -q "同上一張" "$D/README.md"; then fail "空白影格不該寫成同上一張"; fi
+  pass "OCR 沒有文字：每張寫（無）"
 elif [[ "${VID_REQUIRE_OCR:-}" == "1" ]]; then
   fail "VID_REQUIRE_OCR=1 但這台沒有 macOS + swiftc，OCR 測試無法執行"
 else

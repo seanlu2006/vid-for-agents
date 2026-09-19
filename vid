@@ -370,6 +370,7 @@ if [[ $DO_AUDIO -eq 1 && -n "$HAS_AUDIO" ]]; then
 
     # VAD：先用 Silero 找出有人講話的段落，只把那些段落丟給 whisper。
     # 靜音、純音樂段是幻覺迴圈最常發生的地方。VAD 只是加強，任何一步失敗都照常轉錄。
+    VAD_ARGS=()
     if [[ $DO_VAD -eq 1 ]]; then
       VAD_FILE="$MODEL_DIR/ggml-${VAD_MODEL}.bin"
       if ! "$WHISPER" --help 2>&1 | grep -q -- '--vad'; then
@@ -388,11 +389,24 @@ if [[ $DO_AUDIO -eq 1 && -n "$HAS_AUDIO" ]]; then
             echo "⚠️  VAD 模型下載或驗證失敗，這次不用 VAD" >&2
           fi
         fi
-        [[ -f "$VAD_FILE" ]] && WARGS+=(--vad -vm "$VAD_FILE")
+        [[ -f "$VAD_FILE" ]] && VAD_ARGS=(--vad -vm "$VAD_FILE")
       fi
     fi
 
-    if "$WHISPER" "${WARGS[@]}" >/dev/null 2>&1; then
+    # 先帶 VAD 跑；帶 VAD 失敗（模型檔壞掉、這版 whisper 讀不了）就拿掉 VAD 重跑一次。
+    # VAD 只是加強，不能因為它讓整份逐字稿消失。
+    # ${VAD_ARGS[@]+...} 是為了相容 macOS 內建 bash 3.2：空陣列配 set -u 會報 unbound variable
+    WHISPER_OK=0
+    if "$WHISPER" "${WARGS[@]}" ${VAD_ARGS[@]+"${VAD_ARGS[@]}"} >/dev/null 2>&1; then
+      WHISPER_OK=1
+    elif [[ ${#VAD_ARGS[@]} -gt 0 ]]; then
+      echo "⚠️  whisper 帶 VAD 執行失敗，改成不用 VAD 重跑。每次都這樣的話，刪掉 ${VAD_FILE} 讓它重新下載" >&2
+      if "$WHISPER" "${WARGS[@]}" >/dev/null 2>&1; then
+        WHISPER_OK=1
+      fi
+    fi
+
+    if [[ $WHISPER_OK -eq 1 ]]; then
       rm -f "$OUTDIR/audio.wav"
       # whisper 中文輸出是簡體，轉成台灣正體（含用詞轉換）
       if command -v opencc >/dev/null 2>&1; then

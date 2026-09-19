@@ -184,7 +184,7 @@ If Whisper fails, or the file has no audio track, a short Chinese note is append
 
 Audio-only files work too: a podcast episode, a voice memo. There is no picture to sample, so you get the transcript, and the header reads `解析度: 無畫面` ("resolution: no picture"). If a single frame can't be extracted, it's skipped with a warning and the run carries on. The `影格` heading then says how many were lost.
 
-On macOS, `vid` also reads the text on every frame: burned-in captions, title cards, slide bullets. It goes under each frame in the generated README, so the agent learns what the screen says without opening a single image. Burned-in captions tend to stay put for several frames, so when a frame shows exactly the same text as the one before it, the README says `（同上一張）` ("same as previous") instead of repeating it. The raw results are kept in `ocr.json`.
+On macOS, `vid` also reads the text on every frame: burned-in captions, title cards, slide bullets. It goes under each frame in the generated README, so the agent learns what the screen says without opening a single image. Burned-in captions tend to stay put for several frames, so when a frame shows exactly the same text as the one before it, the README says `（同上一張）` ("same as previous") instead of repeating it. A frame with no text at all says `（無）` ("none"), which is shorter than pointing back and needs no lookup. The raw results are kept in `ocr.json`.
 
 ### Options
 
