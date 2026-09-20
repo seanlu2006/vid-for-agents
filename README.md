@@ -199,6 +199,7 @@ On macOS, `vid` also reads the text on every frame: burned-in captions, title ca
 | `--no-audio` | frames only | does both |
 | `--no-ocr` | don't read on-screen text | reads it on macOS |
 | `--no-vad` | send the whole audio track to Whisper, silence included | filters silence first |
+| `--uniform` | sample frames at even intervals only, ignoring scene changes | mixes in scene changes |
 | `--keep-video` | keep the downloaded video | already the default |
 | `--no-keep` | delete the downloaded video when done | keeps it |
 | `-h, --help` | usage | — |
@@ -259,7 +260,7 @@ input ─┬─ URL ──────────► yt-dlp ──► video fil
               │                                   │
            ffmpeg                              ffmpeg
               │                                   │
-     evenly sampled frames               16 kHz mono WAV
+  scene-change + even frames             16 kHz mono WAV
      (JPEG, ≤768 px wide)                         │
               │                     Silero VAD (drops silence)
      macOS Vision OCR                             │
@@ -275,7 +276,11 @@ input ─┬─ URL ──────────► yt-dlp ──► video fil
 
 ### The decisions behind each stage
 
-**Sampling.** Frame *i* is taken at `t = video duration × (i − 0.5) / N` — the midpoint of each equal slice rather than its edge, which sidesteps the black frames and transitions that tend to sit at the very beginning and end. "Video duration" means the video stream, not the container. Reels often pair a 3-second clip with a 10-second soundtrack, and sampling across the container would put most frames after the picture has already ended. Frames are scaled to 768 px wide (never upscaled beyond their original width) at JPEG quality `-q:v 4`. That size sits near the processing resolution of most vision models; anything larger just wastes tokens.
+**Sampling.** A quarter of the frames go to the sharpest scene changes; the rest are spread evenly across the timeline. `ffmpeg`'s `scdet` filter scores every frame at 6 fps and 320 px wide, which took 0.8 s on a 5-minute video, and the highest-scoring moments are taken 0.35 s after the cut so the frame lands past the transition. Each even-interval frame sits at `t = video duration × (i − 0.5) / N`, the midpoint of its slice rather than its edge, which sidesteps the black frames that tend to open and close a video. "Video duration" means the video stream, not the container: Reels often pair a 3-second clip with a 10-second soundtrack, and measuring the container would put most frames after the picture has ended.
+
+The mix is there because neither half wins alone. I tested both on a card that flashes for 0.6 seconds: even sampling missed it and spent two of its four frames on the same shot, while scene detection caught it. On a 5-minute slide recording the result reversed, because the picture changes as annotations are drawn and scene picks bunch up around them. At a quarter, the flash card is still caught and the slide recording keeps all 11 distinct screens it had before. `--uniform` turns the scene half off.
+
+Frames are scaled to 768 px wide (never upscaled beyond their original width) at JPEG quality `-q:v 4`. That size sits near the processing resolution of most vision models; anything larger just wastes tokens.
 
 **On-screen text.** Apple's Vision framework ships with macOS, so OCR needs no download and no extra package. The Swift code that calls it is embedded in `vid` and compiled once into `~/.cache/vid/` the first time it's needed, which keeps the script a single file. Recognition languages are pinned to Traditional Chinese, then English, instead of being left to auto-detect. On a 5-minute trading tutorial, 12 frames came back as 118 lines of text (1,286 characters), and those lines included the step-by-step rules written on the slides. For comparison, opening 12 images would cost the agent far more context than that.
 
@@ -305,13 +310,15 @@ Output is 204 KB in total. That 4.43s covers the whole pipeline — frame extrac
 
 ## Known limitations
 
-1. **This is sampling, not watching.** The agent gets N stills. Twelve frames of a short clip is roughly equivalent to having seen it, but **fast-cut title cards, the details within a continuous action, and frame-by-frame animation will be missed**. For that kind of video, push `-n` above 30, or accept that the transcript is the primary source. OCR reads the text on the frames that were sampled; it can't recover a card that fell between two of them.
+1. **This is sampling, not watching.** The agent gets N stills. Twelve frames of a short clip is roughly equivalent to having seen it, but **the details within a continuous action and frame-by-frame animation will be missed**. Scene detection catches most title cards, including one that was on screen for 0.6 seconds in my test, but a card that appears without a clear cut can still slip between two samples. For that kind of video, push `-n` above 30, or accept that the transcript is the primary source.
 
 2. **Threads doesn't work.** `yt-dlp` has no Threads extractor. `vid` falls back to the generic extractor and tries to pull `og:video` from the page, but the success rate is low — don't build on it.
 
 3. **Login-gated content needs `-c`.** Most Instagram posts and some YouTube videos refuse anonymous downloads and will simply fail without `-c chrome`. Platform anti-scraping measures also change constantly, so a `yt-dlp` you haven't `brew upgrade`d in a while is a common cause of breakage.
 
 4. **Chinese transcripts contain errors.** Whisper is noticeably weaker on Chinese proper nouns, names, and passages that mix in English, and `opencc` only fixes characters, not misrecognition. Treat the output as a draft, not as something to quote. Without `opencc` installed, the output stays in Simplified.
+
+   `opencc`'s Taiwan phrase list also leans software: it turns 类型 into 型別, the word a programmer uses, which was wrong six times in one trading tutorial. `vid` puts that one back to 類型 and keeps the rest of the phrase conversions (軟體, 記憶體, 影片, 資訊, 網路). Add your own pairs with `VID_OPENCC_FIXES="型別=類型,專案=項目"`.
 
 5. **Long videos can send Whisper into a loop.** On recordings longer than about 15 minutes, Whisper sometimes gets stuck and repeats one sentence for hundreds of lines. It happened on 2 of the 8 long tutorial videos I ran. `vid` passes `-mc 0`, so each segment is decoded without the previous text as context, and it runs Silero VAD first, so silent and music-only stretches never reach Whisper. I reran those two videos (21 and 23 minutes) with each setting. Either one stops the loop on its own. Together they also cut transcription time by about a quarter on an M5 (32 → 24 s and 34 → 25 s), the amount of text stays within 1%, and the timestamps still line up with the original video. As a backstop it also scans the transcript: if any line repeats 15 or more times in a row, the `逐字稿` heading gets a warning. Treat that stretch as unreliable.
 
@@ -329,7 +336,15 @@ Output is 204 KB in total. That 4.43s covers the whole pipeline — frame extrac
 tests/test_vid.sh
 ```
 
-The tests run the real `ffmpeg` against generated clips and swap in stand-ins for `whisper-cli` and `curl`, so they finish in seconds and never download the model. They cover the cases that have broken before: audio-only input, audio longer than the picture, custom models without a checksum, a wrong checksum, a failed download, the repeated-line check, VAD and its fallbacks, and a non-UTF-8 locale. The OCR tests are the exception to the stand-ins: they draw caption cards, turn them into a video, and run real Vision on it, so they need macOS with `swiftc`. CI runs ShellCheck and the same script on every push, with `VID_REQUIRE_OCR=1` so the OCR tests can't be skipped quietly.
+The tests run the real `ffmpeg` against generated clips and swap in stand-ins for `whisper-cli` and `curl`, so all 23 finish in seconds and never download the model. They cover the cases that have broken before: audio-only input, audio longer than the picture, custom models without a checksum, a wrong checksum, a failed download, the repeated-line check, VAD and its fallbacks, the phrase corrections after `opencc`, and a non-UTF-8 locale. The OCR tests are the exception to the stand-ins: they draw caption cards, turn them into a video, and run real Vision on it, so they need macOS with `swiftc`. CI runs ShellCheck and the same script on every push, with `VID_REQUIRE_OCR=1` so the OCR tests can't be skipped quietly.
+
+---
+
+## Related projects
+
+[`claude-real-video`](https://github.com/HUANGCHIHHUNGLeo/claude-real-video) (2.1k stars, MIT) answers the same question and started three months before this one did. It does more: scene detection with sliding-window dedup, speaker diarization, an MCP server and a Claude Code plugin, a web viewer. If you want the fuller tool, use that one.
+
+What's different here is narrow. `vid` is one bash file with no Python package to install, and the Traditional Chinese path is the part I actually use: Whisper's Simplified output converted for Taiwan with the software-flavoured phrases corrected, and OCR pinned to Traditional Chinese rather than left to auto-detect. That's the whole claim.
 
 ---
 
