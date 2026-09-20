@@ -14,6 +14,7 @@ jobs:
         run: |
           command -v shellcheck >/dev/null || brew install shellcheck
           command -v ffmpeg >/dev/null || brew install ffmpeg
+          command -v opencc >/dev/null || brew install opencc
       - name: ShellCheck
         run: shellcheck vid install.sh tests/test_vid.sh
       - name: Shell tests

@@ -13,6 +13,7 @@
 #       --no-audio      不轉逐字稿（只要影格）
 #       --no-ocr        不辨識畫面上的文字（macOS 才有，預設開）
 #       --no-vad        whisper 不用 VAD 過濾靜音段（預設開）
+#       --uniform       影格一律均勻抽樣，不看場景變化
 #       --keep-video    保留原始影片檔（預設保留；用 --no-keep 刪掉省空間）
 #       --no-keep       處理完刪掉原始影片
 #       --model NAME    whisper 模型 (預設 large-v3-turbo-q5_0)
@@ -40,6 +41,7 @@ DO_FRAMES=1
 DO_AUDIO=1
 DO_OCR=1
 DO_VAD=1
+UNIFORM=0
 KEEP_VIDEO=1
 MODEL="large-v3-turbo-q5_0"
 MODEL_DIR="$HOME/.cache/whisper-models"
@@ -67,7 +69,7 @@ print(t or "video")
 '
 }
 
-[[ $# -eq 0 ]] && { sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
+[[ $# -eq 0 ]] && { sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
 
 # ── 吃參數的選項：缺參數/型別錯，在解析階段就擋下來 ──────────────────────
 # $1=選項名  $2=剩下的參數個數(含選項本身)  $3=參數值(可能不存在)
@@ -105,9 +107,10 @@ while [[ $# -gt 0 ]]; do
     --no-audio)   DO_AUDIO=0; shift ;;
     --no-ocr)     DO_OCR=0; shift ;;
     --no-vad)     DO_VAD=0; shift ;;
+    --uniform)    UNIFORM=1; shift ;;
     --keep-video) KEEP_VIDEO=1; shift ;;
     --no-keep)    KEEP_VIDEO=0; shift ;;
-    -h|--help)    sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)    sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     -*)           die "不認識的選項: $1" ;;
     *)            INPUT="$1"; shift ;;
   esac
@@ -229,12 +232,63 @@ if [[ $DO_FRAMES -eq 1 && -z "$RES" ]]; then
   FRAME_NOTE="（這個檔案沒有畫面）"
 elif [[ $DO_FRAMES -eq 1 ]] && python3 -c "import sys; sys.exit(0 if float('$VDUR') > 0 else 1)"; then
   mkdir -p "$OUTDIR/frames"
-  info "抽 $FRAMES 張影格…"
+
+  # 先用 scdet 算每一幀的場景變化分數（降到 6fps、320 寬，5 分鐘的片約 1 秒）。
+  # 四分之一的張數留給分數最高的時間點，其餘維持均勻覆蓋：
+  # 剪輯型影片（Reels）靠場景變化才抓得到快閃字卡，投影片錄影則是均勻覆蓋比較不漏。
+  SCENE_RAW=""
+  if [[ $UNIFORM -eq 0 ]]; then
+    SCENE_RAW=$(ffmpeg -nostdin -loglevel error -i "$VIDEO" -an \
+                  -vf "fps=6,scale=320:-2,scdet=threshold=0,metadata=print:file=-" \
+                  -f null - 2>/dev/null || true)
+    [[ -z "$SCENE_RAW" ]] && echo "⚠️  場景偵測沒有結果，改用均勻抽樣" >&2
+  fi
+
+  TIMES=$(printf '%s' "$SCENE_RAW" | python3 -c '
+import re, sys
+dur, n = float(sys.argv[1]), int(sys.argv[2])
+cands, t = [], None
+for line in sys.stdin:
+    m = re.match(r"frame:\d+\s+pts:\S+\s+pts_time:([\d.]+)", line)
+    if m:
+        t = float(m.group(1)); continue
+    m = re.match(r"lavfi\.scd\.score=([\d.]+)", line)
+    if m and t is not None:
+        cands.append((float(m.group(1)), t))
+gap = max(0.5, dur / (n * 3))          # 兩張之間至少隔這麼久，免得全擠在同一個轉場
+picked = []
+def ok(x): return 0 < x < dur and all(abs(x - p) >= gap for p in picked)
+for score, t in sorted(cands, reverse=True):
+    if score <= 0: break
+    t2 = min(t + 0.35, dur - 0.05)     # 轉場後 0.35 秒，避開淡入淡出中間
+    if ok(t2): picked.append(t2)
+    if len(picked) >= max(1, n // 4): break
+scene_n = len(picked)
+
+def fill(min_gap, slots):                # 其餘用均勻取樣補滿覆蓋率
+    for k in range(slots):
+        if len(picked) >= n: return
+        t = dur * (k + 0.5) / slots
+        if 0 < t < dur and all(abs(t - p) >= min_gap for p in picked):
+            picked.append(t)
+
+fill(gap, n)
+fill(gap / 2, n * 2)                     # 還不夠就放寬間隔，張數要湊滿
+fill(0.05, n * 4)
+print(scene_n, file=sys.stderr)
+for t in sorted(picked)[:n]: print(round(t, 2))
+' "$VDUR" "$FRAMES" 2>"$OUTDIR/.scene_n")
+  SCENE_N=$(cat "$OUTDIR/.scene_n" 2>/dev/null || echo 0); rm -f "$OUTDIR/.scene_n"
+  if [[ "${SCENE_N:-0}" -gt 0 ]]; then
+    info "抽 $FRAMES 張影格（場景變化 ${SCENE_N} 張 + 均勻覆蓋 $((FRAMES - SCENE_N)) 張）…"
+  else
+    info "抽 $FRAMES 張影格（均勻抽樣）…"
+  fi
+
   SKIPPED=0
   i=1
-  while [[ $i -le $FRAMES ]]; do
-    # 在畫面串流長度內均勻取樣，取每段中點，避開頭尾黑畫面
-    T=$(python3 -c "print(round($VDUR*($i-0.5)/$FRAMES,2))")
+  while read -r T; do
+    [[ -z "$T" ]] && continue
     MM=$(python3 -c "print(f'{int($T)//60:02d}m{int($T)%60:02d}s')")
     OUT=$(printf "%s/frames/f%03d_%s.jpg" "$OUTDIR" "$i" "$MM")
     if ffmpeg -nostdin -loglevel error -ss "$T" -i "$VIDEO" \
@@ -246,7 +300,7 @@ elif [[ $DO_FRAMES -eq 1 ]] && python3 -c "import sys; sys.exit(0 if float('$VDU
       echo "⚠️  第 ${i} 張影格（${MM}）抽取失敗，已跳過" >&2
     fi
     i=$((i+1))
-  done
+  done <<< "$TIMES"
   if [[ $SKIPPED -gt 0 ]]; then
     FRAME_NOTE="（${FRAMES} 張中有 ${SKIPPED} 張抽取失敗，已跳過）"
   fi
@@ -408,11 +462,27 @@ if [[ $DO_AUDIO -eq 1 && -n "$HAS_AUDIO" ]]; then
 
     if [[ $WHISPER_OK -eq 1 ]]; then
       rm -f "$OUTDIR/audio.wav"
-      # whisper 中文輸出是簡體，轉成台灣正體（含用詞轉換）
+      # whisper 中文輸出是簡體，轉成台灣正體（含用詞轉換）。
+      # s2twp 的台灣詞庫偏軟體領域，少數對應在一般內容裡是錯的
+      # （例：「类型」被轉成寫程式才講的「型別」）。這些改回來，
+      # 其餘轉換（軟體、記憶體、影片、資訊、網路…）都保留。
+      # 要再加自己的對應：VID_OPENCC_FIXES="錯的=對的,錯的=對的"
       if command -v opencc >/dev/null 2>&1; then
         for f in "$OUTDIR/transcript.txt" "$OUTDIR/transcript.srt"; do
           [[ -f "$f" ]] || continue
           if opencc -c s2twp -i "$f" -o "$f.tw" 2>/dev/null && [[ -s "$f.tw" ]]; then
+            python3 -c '
+import os, sys
+fixes = {"型別": "類型"}
+for pair in os.environ.get("VID_OPENCC_FIXES", "").split(","):
+    if "=" in pair:
+        bad, good = pair.split("=", 1)
+        if bad.strip(): fixes[bad.strip()] = good.strip()
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+for bad, good in fixes.items(): text = text.replace(bad, good)
+open(path, "w", encoding="utf-8").write(text)
+' "$f.tw" 2>/dev/null || true
             mv "$f.tw" "$f"
           else
             rm -f "$f.tw"

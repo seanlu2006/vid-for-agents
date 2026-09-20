@@ -26,7 +26,11 @@ echo "$*" > "$FAKE_WHISPER_ARGS"
 # FAKE_WHISPER_VAD_FAIL=1：模擬 VAD 模型壞掉，帶 --vad 就執行失敗
 if [[ "${FAKE_WHISPER_VAD_FAIL:-}" == "1" && " $* " == *" --vad "* ]]; then exit 1; fi
 of=""; while [[ $# -gt 0 ]]; do [[ "$1" == "-of" ]] && of="$2"; shift; done
-if [[ "${FAKE_WHISPER_MODE:-}" == "repeat" ]]; then
+if [[ "${FAKE_WHISPER_MODE:-}" == "zh" ]]; then
+  # 簡體輸出，用來驗證 opencc 轉換與用詞修正
+  printf '1\n00:00:00,000 --> 00:00:02,000\n这个类型的设置和视频内存\n\n' > "$of.srt"
+  echo "这个类型的设置和视频内存" > "$of.txt"
+elif [[ "${FAKE_WHISPER_MODE:-}" == "repeat" ]]; then
   for i in $(seq 1 20); do printf '%d\n00:00:%02d,000 --> 00:00:%02d,500\nthank you\n\n' "$i" "$i" "$i"; done > "$of.srt"
   for i in $(seq 1 20); do echo "thank you"; done > "$of.txt"
 else
@@ -196,6 +200,22 @@ grep -q "改成不用 VAD 重跑" "$TMPD/stderr" || fail "應該警告改成不�
 if grep -q "whisper 執行失敗" "$D/README.md"; then fail "重跑成功就不該標示 whisper 執行失敗"; fi
 pass "VAD 執行失敗：拿掉 VAD 重跑"
 
+# 20. 簡轉繁：保留 s2twp 的台灣用詞，但把偏程式領域的「型別」改回「類型」
+if command -v opencc >/dev/null 2>&1; then
+  H=$(new_home zh); with_model "$H" large-v3-turbo-q5_0; with_model "$H" silero-v6.2.0
+  FAKE_WHISPER_MODE=zh run_vid "$H" "$TMPD/audio-only.m4a" -l zh -o "$TMPD/out20" || fail "應該成功"
+  D=$(only_outdir "$TMPD/out20")
+  grep -q "類型" "$D/transcript.txt" || fail "「类型」應轉成「類型」"
+  if grep -q "型別" "$D/transcript.txt"; then fail "不該出現寫程式才用的「型別」"; fi
+  grep -q "設定" "$D/transcript.txt" || fail "s2twp 的「设置→設定」應保留"
+  grep -q "影片" "$D/transcript.txt" || fail "s2twp 的「视频→影片」應保留"
+  grep -q "記憶體" "$D/transcript.txt" || fail "s2twp 的「内存→記憶體」應保留"
+  grep -q "類型" "$D/transcript.srt" || fail "srt 也要一起修"
+  pass "簡轉繁：保留台灣用詞，修掉過度轉換"
+else
+  echo "  ⏭  跳過簡轉繁測試（沒裝 opencc）"
+fi
+
 # 15–17. 畫面文字 OCR（macOS Vision）。需要 macOS + swiftc；
 #        CI 設 VID_REQUIRE_OCR=1，缺工具就算失敗，避免測試被默默跳過
 if [[ "$(uname -s)" == "Darwin" ]] && command -v swiftc >/dev/null 2>&1; then
@@ -256,6 +276,25 @@ SWIFT
   D=$(only_outdir "$TMPD/out18")
   grep -q "回測支撐區才進場" "$D/README.md" || fail "非 UTF-8 locale 下 README 應有中文畫面文字"
   pass "非 UTF-8 locale：中文檔名與 OCR 文字正常"
+
+  # 21. 場景變化抽樣：抓得到只出現 0.6 秒的快閃字卡；--uniform 則會漏掉
+  "$TMPD/card" "$TMPD/flashA.png" "第一段 AAA"
+  "$TMPD/card" "$TMPD/flashB.png" "快閃重點 BBB"
+  "$TMPD/card" "$TMPD/flashC.png" "最後結論 CCC"
+  ffmpeg -nostdin -loglevel error -loop 1 -t 4 -i "$TMPD/flashA.png" -loop 1 -t 0.6 -i "$TMPD/flashB.png" \
+         -loop 1 -t 5.4 -i "$TMPD/flashC.png" \
+         -filter_complex "[0][1][2]concat=n=3:v=1:a=0,format=yuv420p" -r 30 -y "$TMPD/flash.mp4"
+  H=$(new_home ocr)
+  run_vid "$H" "$TMPD/flash.mp4" -n 4 --no-audio -o "$TMPD/out21" || fail "場景抽樣應該成功"
+  D=$(only_outdir "$TMPD/out21")
+  grep -q "BBB" "$D/README.md" || fail "場景抽樣應該抓到 0.6 秒的快閃字卡"
+  grep -q "場景變化" "$TMPD/stderr" || fail "應該顯示有幾張來自場景變化"
+  [[ $(find "$D/frames" -name '*.jpg' | wc -l | tr -d ' ') -eq 4 ]] || fail "應該剛好 4 張"
+  run_vid "$H" "$TMPD/flash.mp4" -n 4 --no-audio --uniform -o "$TMPD/out21b" || fail "--uniform 應該成功"
+  D=$(only_outdir "$TMPD/out21b")
+  if grep -q "BBB" "$D/README.md"; then fail "--uniform 在這支片本來就該漏掉快閃卡（測試前提變了）"; fi
+  grep -q "均勻抽樣" "$TMPD/stderr" || fail "--uniform 應該顯示均勻抽樣"
+  pass "場景抽樣：抓到快閃字卡，--uniform 則漏掉"
 
   # 19. 完全沒有文字的影格寫「（無）」，不合併成「同上一張」：
   #     「（無）」比「（同上一張）」短，而且 agent 不用往回找
