@@ -8,6 +8,9 @@ BIN_DIR="$HOME/bin"
 MODEL_REVISION="5359861c739e955e79d9a303bcbc70fb988958b1"
 # Hugging Face LFS oid (SHA-256) for the default model at MODEL_REVISION.
 DEFAULT_MODEL_SHA256="394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2"
+VAD_MODEL="silero-v6.2.0"
+VAD_REVISION="9ffd54a1e1ee413ddf265af9913beaf518d1639b"
+VAD_SHA256="2aa269b785eeb53a82983a20501ddf7c1d9c48e33ab63a41391ac6c9f7fb6987"
 
 ok()   { echo "✅ $*"; }
 info() { echo "→  $*"; }
@@ -59,6 +62,29 @@ else
   fi
   mv "$MODEL_FILE.part" "$MODEL_FILE"
   ok "模型下載並驗證完成"
+fi
+
+# 3b. VAD 模型（約 0.9 MB）：先把靜音段濾掉，長片不容易鬼打牆。
+#     失敗不中止安裝，vid 執行時會再試，真的沒有就不用 VAD 照常轉錄
+VAD_FILE="$MODEL_DIR/ggml-${VAD_MODEL}.bin"
+if [[ -f "$VAD_FILE" ]]; then
+  ok "VAD 模型已存在"
+elif curl -L --fail -sS \
+       "https://huggingface.co/ggml-org/whisper-vad/resolve/${VAD_REVISION}/ggml-${VAD_MODEL}.bin" \
+       -o "$VAD_FILE.part" \
+     && [[ "$(shasum -a 256 "$VAD_FILE.part" | awk '{print $1}')" == "$VAD_SHA256" ]]; then
+  mv "$VAD_FILE.part" "$VAD_FILE"
+  ok "VAD 模型下載並驗證完成"
+else
+  rm -f "$VAD_FILE.part"
+  echo "⚠️  VAD 模型下載失敗，先略過（vid 執行時會再試）"
+fi
+
+# 3c. 畫面文字 OCR 需要 swiftc（Xcode Command Line Tools）。沒有也能用 vid，只是不做 OCR
+if command -v swiftc >/dev/null 2>&1; then
+  ok "swiftc 已存在，可以辨識畫面文字"
+else
+  echo "⚠️  沒有 swiftc，vid 會跳過畫面文字辨識。要的話執行: xcode-select --install"
 fi
 
 # 4. 安裝指令

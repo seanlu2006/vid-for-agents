@@ -16,7 +16,15 @@ fail() { echo "  ❌ $*" >&2; [[ -f "$TMPD/stderr" ]] && sed 's/^/     | /' "$TM
 FAKE="$TMPD/fakebin"; mkdir -p "$FAKE"
 cat > "$FAKE/whisper-cli" <<'SH'
 #!/usr/bin/env bash
+# vid 會先看 --help 判斷支不支援 VAD；FAKE_WHISPER_NO_VAD=1 模擬舊版
+if [[ "${1:-}" == "--help" ]]; then
+  echo "usage: whisper-cli [options] file"
+  [[ "${FAKE_WHISPER_NO_VAD:-}" == "1" ]] || echo "  --vad   enable Voice Activity Detection (VAD)"
+  exit 0
+fi
 echo "$*" > "$FAKE_WHISPER_ARGS"
+# FAKE_WHISPER_VAD_FAIL=1：模擬 VAD 模型壞掉，帶 --vad 就執行失敗
+if [[ "${FAKE_WHISPER_VAD_FAIL:-}" == "1" && " $* " == *" --vad "* ]]; then exit 1; fi
 of=""; while [[ $# -gt 0 ]]; do [[ "$1" == "-of" ]] && of="$2"; shift; done
 if [[ "${FAKE_WHISPER_MODE:-}" == "repeat" ]]; then
   for i in $(seq 1 20); do printf '%d\n00:00:%02d,000 --> 00:00:%02d,500\nthank you\n\n' "$i" "$i" "$i"; done > "$of.srt"
@@ -146,5 +154,122 @@ PY
 )
 [[ -z "$BAD" ]] || fail "變數後面直接接非 ASCII 字元，請改成 \${VAR}：$BAD"
 pass "變數與中文之間都用大括號隔開"
+
+# 11. VAD 預設開：VAD 模型在 → whisper 帶 --vad 和 -vm
+H=$(new_home vad1); with_model "$H" large-v3-turbo-q5_0; with_model "$H" silero-v6.2.0
+run_vid "$H" "$TMPD/audio-only.m4a" -o "$TMPD/out11" || fail "應該成功"
+grep -q -- "--vad -vm $H/.cache/whisper-models/ggml-silero-v6.2.0.bin" "$FAKE_WHISPER_ARGS" \
+  || fail "預設應帶 --vad：$(cat "$FAKE_WHISPER_ARGS")"
+pass "VAD 預設開啟"
+
+# 12. --no-vad → 不帶 --vad
+H=$(new_home vad2); with_model "$H" large-v3-turbo-q5_0; with_model "$H" silero-v6.2.0
+run_vid "$H" "$TMPD/audio-only.m4a" --no-vad -o "$TMPD/out12" || fail "應該成功"
+if grep -q -- "--vad" "$FAKE_WHISPER_ARGS"; then fail "--no-vad 不該帶 --vad"; fi
+pass "--no-vad 關閉 VAD"
+
+# 13. whisper 太舊不支援 --vad → 不帶、警告、照常轉錄
+H=$(new_home vad3); with_model "$H" large-v3-turbo-q5_0; with_model "$H" silero-v6.2.0
+FAKE_WHISPER_NO_VAD=1 run_vid "$H" "$TMPD/audio-only.m4a" -o "$TMPD/out13" || fail "舊版 whisper 應該照常成功"
+if grep -q -- "--vad" "$FAKE_WHISPER_ARGS"; then fail "舊版 whisper 不該被塞 --vad"; fi
+grep -q "不支援 --vad" "$TMPD/stderr" || fail "應該警告不支援 VAD"
+pass "whisper 不支援 VAD：略過並照常轉錄"
+
+# 14. VAD 模型下載後 checksum 不符 → 警告、不用 VAD、照常轉錄、不留 .part
+#     （假 curl 寫出的內容 SHA 一定對不上）
+H=$(new_home vad4); with_model "$H" large-v3-turbo-q5_0
+run_vid "$H" "$TMPD/audio-only.m4a" -o "$TMPD/out14" || fail "VAD 下載失敗不該讓整個失敗"
+if grep -q -- "--vad" "$FAKE_WHISPER_ARGS"; then fail "VAD 驗證失敗不該帶 --vad"; fi
+grep -q "VAD 模型下載或驗證失敗" "$TMPD/stderr" || fail "應該警告 VAD 下載失敗"
+[[ ! -e "$H/.cache/whisper-models/ggml-silero-v6.2.0.bin" && ! -e "$H/.cache/whisper-models/ggml-silero-v6.2.0.bin.part" ]] \
+  || fail "VAD 驗證失敗不該留下檔案"
+pass "VAD 模型驗證失敗：略過並照常轉錄"
+
+# 14b. VAD 模型在但 whisper 帶 --vad 執行失敗（檔案壞掉、版本讀不了）
+#      → 拿掉 VAD 重跑，逐字稿不能消失
+H=$(new_home vad5); with_model "$H" large-v3-turbo-q5_0; with_model "$H" silero-v6.2.0
+FAKE_WHISPER_VAD_FAIL=1 run_vid "$H" "$TMPD/audio-only.m4a" -o "$TMPD/out14b" || fail "VAD 執行失敗應該重跑成功"
+D=$(only_outdir "$TMPD/out14b")
+[[ -s "$D/transcript.txt" ]] || fail "拿掉 VAD 重跑後應該有逐字稿"
+if grep -q -- "--vad" "$FAKE_WHISPER_ARGS"; then fail "重跑那次不該再帶 --vad"; fi
+grep -q "改成不用 VAD 重跑" "$TMPD/stderr" || fail "應該警告改成不用 VAD 重跑"
+if grep -q "whisper 執行失敗" "$D/README.md"; then fail "重跑成功就不該標示 whisper 執行失敗"; fi
+pass "VAD 執行失敗：拿掉 VAD 重跑"
+
+# 15–17. 畫面文字 OCR（macOS Vision）。需要 macOS + swiftc；
+#        CI 設 VID_REQUIRE_OCR=1，缺工具就算失敗，避免測試被默默跳過
+if [[ "$(uname -s)" == "Darwin" ]] && command -v swiftc >/dev/null 2>&1; then
+  # 用 AppKit 畫兩張有中英文字的直式字卡，接成 6 秒影片（前 3 秒 A、後 3 秒 B）
+  cat > "$TMPD/card.swift" <<'SWIFT'
+import AppKit
+let a = CommandLine.arguments
+let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 1080, pixelsHigh: 1920, bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+NSGraphicsContext.saveGraphicsState(); NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+NSColor(calibratedRed: 0.15, green: 0.2, blue: 0.3, alpha: 1).setFill(); NSRect(x: 0, y: 0, width: 1080, height: 1920).fill()
+let font = NSFont(name: "PingFangTC-Semibold", size: 56) ?? NSFont.boldSystemFont(ofSize: 56)
+for (i, l) in a.dropFirst(2).enumerated() {
+  (l as NSString).draw(at: NSPoint(x: 60, y: 420 - CGFloat(i) * 90), withAttributes: [.font: font, .foregroundColor: NSColor.white])
+}
+NSGraphicsContext.restoreGraphicsState()
+try! rep.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: a[1]))
+SWIFT
+  swiftc -O "$TMPD/card.swift" -o "$TMPD/card" >/dev/null 2>&1 || fail "測試用字卡產生器編譯失敗"
+  "$TMPD/card" "$TMPD/a.png" "回測支撐區才進場" "Wait for the retest"
+  "$TMPD/card" "$TMPD/b.png" "停損放在結構低點下方" "Stop loss below the swing low"
+  ffmpeg -nostdin -loglevel error -loop 1 -t 3 -i "$TMPD/a.png" -loop 1 -t 3 -i "$TMPD/b.png" \
+         -filter_complex "[0][1]concat=n=2:v=1:a=0,format=yuv420p" -r 30 -c:v libx264 -y "$TMPD/cards.mp4"
+
+  # 15. 辨識畫面文字，並把連續相同的標成「同上一張」
+  H=$(new_home ocr)
+  run_vid "$H" "$TMPD/cards.mp4" -n 4 --no-audio -o "$TMPD/out15" || fail "OCR 應該成功"
+  D=$(only_outdir "$TMPD/out15")
+  [[ -s "$D/ocr.json" ]] || fail "應該產生 ocr.json"
+  grep -q "Wait for the retest" "$D/README.md" || fail "README 應有英文畫面文字"
+  grep -q "停損放在結構低點下方" "$D/README.md" || fail "README 應有繁中畫面文字"
+  [[ $(grep -c "同上一張" "$D/README.md") -eq 2 ]] || fail "4 張裡應有 2 張標成同上一張"
+  pass "OCR：辨識中英文字並去掉重複"
+
+  # 16. --no-ocr → 不做 OCR
+  run_vid "$H" "$TMPD/cards.mp4" -n 2 --no-audio --no-ocr -o "$TMPD/out16" || fail "應該成功"
+  D=$(only_outdir "$TMPD/out16")
+  [[ ! -e "$D/ocr.json" ]] || fail "--no-ocr 不該產生 ocr.json"
+  if grep -q "畫面文字" "$D/README.md"; then fail "--no-ocr 不該有畫面文字"; fi
+  pass "--no-ocr 關閉 OCR"
+
+  # 17. swiftc 編譯失敗 → 警告、跳過 OCR、影格照樣產生
+  BADSWIFT="$TMPD/badswift"; mkdir -p "$BADSWIFT"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$BADSWIFT/swiftc"; chmod +x "$BADSWIFT/swiftc"
+  H=$(new_home ocrbad)
+  HOME="$H" PATH="$BADSWIFT:$FAKE:$PATH" "$VID" "$TMPD/cards.mp4" -n 2 --no-audio -o "$TMPD/out17" \
+    >"$TMPD/stdout" 2>"$TMPD/stderr" || fail "OCR 編譯失敗不該讓整個失敗"
+  D=$(only_outdir "$TMPD/out17")
+  grep -q "OCR 編譯失敗" "$D/README.md" || fail "README 應註明 OCR 編譯失敗"
+  [[ $(find "$D/frames" -name '*.jpg' | wc -l | tr -d ' ') -eq 2 ]] || fail "影格應照樣產生"
+  pass "OCR 編譯失敗：跳過並照常產出"
+
+  # 18. 非 UTF-8 locale + 中文檔名 + 中文 OCR：python3 印中文不能崩潰
+  #     （CI 的預設 locale 就不是 UTF-8）
+  cp "$TMPD/cards.mp4" "$TMPD/中文字卡.mp4"
+  H=$(new_home ocr)
+  LC_ALL=en_US.ISO8859-15 run_vid "$H" "$TMPD/中文字卡.mp4" -n 2 --no-audio -o "$TMPD/out18" \
+    || fail "非 UTF-8 locale 下處理中文應該成功"
+  D=$(only_outdir "$TMPD/out18")
+  grep -q "回測支撐區才進場" "$D/README.md" || fail "非 UTF-8 locale 下 README 應有中文畫面文字"
+  pass "非 UTF-8 locale：中文檔名與 OCR 文字正常"
+
+  # 19. 完全沒有文字的影格寫「（無）」，不合併成「同上一張」：
+  #     「（無）」比「（同上一張）」短，而且 agent 不用往回找
+  ffmpeg -nostdin -loglevel error -f lavfi -i "color=c=gray:s=640x360:d=3" -r 30 -c:v libx264 -pix_fmt yuv420p -y "$TMPD/blank.mp4"
+  H=$(new_home ocr)
+  run_vid "$H" "$TMPD/blank.mp4" -n 3 --no-audio -o "$TMPD/out19" || fail "空白畫面應該成功"
+  D=$(only_outdir "$TMPD/out19")
+  [[ $(grep -c "畫面文字：（無）" "$D/README.md") -eq 3 ]] || fail "3 張空白影格都應寫（無）"
+  if grep -q "同上一張" "$D/README.md"; then fail "空白影格不該寫成同上一張"; fi
+  pass "OCR 沒有文字：每張寫（無）"
+elif [[ "${VID_REQUIRE_OCR:-}" == "1" ]]; then
+  fail "VID_REQUIRE_OCR=1 但這台沒有 macOS + swiftc，OCR 測試無法執行"
+else
+  echo "  ⏭  跳過 OCR 測試（需要 macOS + swiftc）"
+fi
 
 echo "全部 $PASS 項通過"
