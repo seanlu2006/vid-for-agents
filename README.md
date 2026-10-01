@@ -184,7 +184,7 @@ If Whisper fails, or the file has no audio track, a short Chinese note is append
 
 Audio-only files work too: a podcast episode, a voice memo. There is no picture to sample, so you get the transcript, and the header reads `解析度: 無畫面` ("resolution: no picture"). If a single frame can't be extracted, it's skipped with a warning and the run carries on. The `影格` heading then says how many were lost.
 
-On macOS, `vid` also reads the text on every frame: burned-in captions, title cards, slide bullets. It goes under each frame in the generated README, so the agent learns what the screen says without opening a single image. Burned-in captions tend to stay put for several frames, so when a frame shows exactly the same text as the one before it, the README says `（同上一張）` ("same as previous") instead of repeating it. A frame with no text at all says `（無）` ("none"), which is shorter than pointing back and needs no lookup. The raw results are kept in `ocr.json`.
+On macOS, `vid` also reads the text on every frame: burned-in captions, title cards, slide bullets. It goes under each frame in the generated README, so the agent learns what the screen says without opening a single image. Burned-in captions tend to stay put for several frames, so when a frame shows exactly the same text as the one before it, the README says `（同上一張）` ("same as previous") instead of repeating it. A frame with no text at all says `（無）` ("none"), which is shorter than pointing back and needs no lookup. Like the transcript, the text is converted to Taiwan Traditional Chinese, so a Reel with Simplified captions doesn't leave two scripts side by side in one README. `ocr.json` keeps both: the converted `lines` and the original under `raw_lines`.
 
 ### Options
 
@@ -284,6 +284,8 @@ Frames are scaled to 768 px wide (never upscaled beyond their original width) at
 
 **On-screen text.** Apple's Vision framework ships with macOS, so OCR needs no download and no extra package. The Swift code that calls it is embedded in `vid` and compiled once into `~/.cache/vid/` the first time it's needed, which keeps the script a single file. Recognition languages are pinned to Traditional Chinese, then English, instead of being left to auto-detect. On a 5-minute trading tutorial, 12 frames came back as 118 lines of text (1,286 characters), and those lines included the step-by-step rules written on the slides. For comparison, opening 12 images would cost the agent far more context than that.
 
+It also turned out to be a second opinion on the transcript. In a 20-second Reel, Whisper heard 去揚聲 where the captions said 去養生, and 留向不屈愛的人 where they said 留下不缺愛的人. Captions are typed by the creator, so when the two disagree, the screen is often the one to trust.
+
 **Local Whisper rather than a cloud API**, for three reasons:
 
 1. **Cost.** One video and a hundred videos both cost $0, so you never have to decide whether a clip is worth paying to transcribe.
@@ -336,7 +338,7 @@ Output is 204 KB in total. That 4.43s covers the whole pipeline — frame extrac
 tests/test_vid.sh
 ```
 
-The tests run the real `ffmpeg` against generated clips and swap in stand-ins for `whisper-cli` and `curl`, so all 23 finish in seconds and never download the model. They cover the cases that have broken before: audio-only input, audio longer than the picture, custom models without a checksum, a wrong checksum, a failed download, the repeated-line check, VAD and its fallbacks, the phrase corrections after `opencc`, and a non-UTF-8 locale. The OCR tests are the exception to the stand-ins: they draw caption cards, turn them into a video, and run real Vision on it, so they need macOS with `swiftc`. CI runs ShellCheck and the same script on every push, with `VID_REQUIRE_OCR=1` so the OCR tests can't be skipped quietly.
+The tests run the real `ffmpeg` against generated clips and swap in stand-ins for `whisper-cli` and `curl`, so all 24 finish in seconds and never download the model. They cover the cases that have broken before: audio-only input, audio longer than the picture, custom models without a checksum, a wrong checksum, a failed download, the repeated-line check, VAD and its fallbacks, the phrase corrections after `opencc`, and a non-UTF-8 locale. The OCR tests are the exception to the stand-ins: they draw caption cards, turn them into a video, and run real Vision on it, so they need macOS with `swiftc`. CI runs ShellCheck and the same script on every push, with `VID_REQUIRE_OCR=1` so the OCR tests can't be skipped quietly.
 
 ---
 

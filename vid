@@ -69,6 +69,37 @@ print(t or "video")
 '
 }
 
+# ── 簡轉繁：把檔案就地轉成台灣正體（含用詞轉換）──────────────────────────
+# 逐字稿與 OCR 共用這一套，兩邊才會一致。
+# s2twp 的台灣詞庫偏軟體領域，少數對應在一般內容裡是錯的
+# （例：「类型」被轉成寫程式才講的「型別」）。這些改回來，
+# 其餘轉換（軟體、記憶體、影片、資訊、網路…）都保留。
+# 要再加自己的對應：VID_OPENCC_FIXES="錯的=對的,錯的=對的"
+# 沒裝 opencc 或轉換失敗就保持原樣，回傳非 0。
+to_tw() {
+  local f="$1"
+  command -v opencc >/dev/null 2>&1 || return 1
+  [[ -f "$f" ]] || return 1
+  if opencc -c s2twp -i "$f" -o "$f.tw" 2>/dev/null && [[ -s "$f.tw" ]]; then
+    python3 -c '
+import os, sys
+fixes = {"型別": "類型"}
+for pair in os.environ.get("VID_OPENCC_FIXES", "").split(","):
+    if "=" in pair:
+        bad, good = pair.split("=", 1)
+        if bad.strip(): fixes[bad.strip()] = good.strip()
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+for bad, good in fixes.items(): text = text.replace(bad, good)
+open(path, "w", encoding="utf-8").write(text)
+' "$f.tw" 2>/dev/null || true
+    mv "$f.tw" "$f"
+    return 0
+  fi
+  rm -f "$f.tw"
+  return 1
+}
+
 [[ $# -eq 0 ]] && { sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
 
 # ── 吃參數的選項：缺參數/型別錯，在解析階段就擋下來 ──────────────────────
@@ -369,6 +400,31 @@ if [[ $DO_OCR -eq 1 && -n "$FRAME_LIST" ]]; then
     info "辨識畫面文字…"
     if OCR_JSON=$("$OCR_BIN" "$OUTDIR"/frames/*.jpg 2>/dev/null); then
       printf '%s' "$OCR_JSON" > "$OUTDIR/ocr.json"
+      # 畫面文字也轉台灣正體，跟逐字稿一致（簡體字幕的 Reels 很常見）。
+      # 每行攤平成一個文字檔一次轉完，再依行數放回；原文留在 raw_lines。
+      python3 -c '
+import json, sys
+for d in json.load(open(sys.argv[1], encoding="utf-8")):
+    for line in d["lines"]: print(line.replace("\n", " "))
+' "$OUTDIR/ocr.json" > "$OUTDIR/.ocr_lines.txt"
+      if [[ -s "$OUTDIR/.ocr_lines.txt" ]] && to_tw "$OUTDIR/.ocr_lines.txt"; then
+        python3 -c '
+import json, sys
+path, conv = sys.argv[1], sys.argv[2]
+data = json.load(open(path, encoding="utf-8"))
+tw = open(conv, encoding="utf-8").read().split("\n")
+if tw and tw[-1] == "": tw.pop()
+if len(tw) != sum(len(d["lines"]) for d in data):
+    sys.exit(0)                      # 行數對不上就不動，寧可留簡體也不要錯位
+i = 0
+for d in data:
+    n = len(d["lines"])
+    d["raw_lines"], d["lines"] = d["lines"], tw[i:i + n]
+    i += n
+json.dump(data, open(path, "w", encoding="utf-8"), ensure_ascii=False)
+' "$OUTDIR/ocr.json" "$OUTDIR/.ocr_lines.txt" || true
+      fi
+      rm -f "$OUTDIR/.ocr_lines.txt"
     else
       OCR_JSON=""
       OCR_NOTE="（畫面文字：OCR 執行失敗，已跳過）"
@@ -462,33 +518,9 @@ if [[ $DO_AUDIO -eq 1 && -n "$HAS_AUDIO" ]]; then
 
     if [[ $WHISPER_OK -eq 1 ]]; then
       rm -f "$OUTDIR/audio.wav"
-      # whisper 中文輸出是簡體，轉成台灣正體（含用詞轉換）。
-      # s2twp 的台灣詞庫偏軟體領域，少數對應在一般內容裡是錯的
-      # （例：「类型」被轉成寫程式才講的「型別」）。這些改回來，
-      # 其餘轉換（軟體、記憶體、影片、資訊、網路…）都保留。
-      # 要再加自己的對應：VID_OPENCC_FIXES="錯的=對的,錯的=對的"
-      if command -v opencc >/dev/null 2>&1; then
-        for f in "$OUTDIR/transcript.txt" "$OUTDIR/transcript.srt"; do
-          [[ -f "$f" ]] || continue
-          if opencc -c s2twp -i "$f" -o "$f.tw" 2>/dev/null && [[ -s "$f.tw" ]]; then
-            python3 -c '
-import os, sys
-fixes = {"型別": "類型"}
-for pair in os.environ.get("VID_OPENCC_FIXES", "").split(","):
-    if "=" in pair:
-        bad, good = pair.split("=", 1)
-        if bad.strip(): fixes[bad.strip()] = good.strip()
-path = sys.argv[1]
-text = open(path, encoding="utf-8").read()
-for bad, good in fixes.items(): text = text.replace(bad, good)
-open(path, "w", encoding="utf-8").write(text)
-' "$f.tw" 2>/dev/null || true
-            mv "$f.tw" "$f"
-          else
-            rm -f "$f.tw"
-          fi
-        done
-      fi
+      # whisper 中文輸出是簡體，轉成台灣正體（見 to_tw）
+      to_tw "$OUTDIR/transcript.txt" || true
+      to_tw "$OUTDIR/transcript.srt" || true
       # 安全網：同一句連續出現 ≥15 次，幾乎一定是幻覺迴圈
       if [[ -f "$OUTDIR/transcript.srt" ]]; then
         MAX_REPEAT=$(awk '

@@ -296,6 +296,28 @@ SWIFT
   grep -q "均勻抽樣" "$TMPD/stderr" || fail "--uniform 應該顯示均勻抽樣"
   pass "場景抽樣：抓到快閃字卡，--uniform 則漏掉"
 
+  # 22. 簡體字幕的 OCR 也要轉台灣正體（含用詞修正），原文留在 raw_lines
+  if command -v opencc >/dev/null 2>&1; then
+    "$TMPD/card" "$TMPD/simp.png" "在你不考试的时候" "这个类型的设置"
+    ffmpeg -nostdin -loglevel error -loop 1 -t 2 -i "$TMPD/simp.png" -r 30 -c:v libx264 -pix_fmt yuv420p -y "$TMPD/simp.mp4"
+    H=$(new_home ocr)
+    run_vid "$H" "$TMPD/simp.mp4" -n 1 --no-audio -o "$TMPD/out22" || fail "應該成功"
+    D=$(only_outdir "$TMPD/out22")
+    grep -q "在你不考試的時候" "$D/README.md" || fail "OCR 的簡體應轉成正體"
+    grep -q "類型" "$D/README.md" || fail "OCR 也要套用用詞修正（类型→類型）"
+    if grep -qE "考试|时候|型別" "$D/README.md"; then fail "README 不該殘留簡體或「型別」"; fi
+    python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))[0]
+assert any("考试" in x for x in d["raw_lines"]), d
+assert any("考試" in x for x in d["lines"]), d
+' "$D/ocr.json" || fail "ocr.json 應保留 raw_lines 原文並存轉換後的 lines"
+    [[ ! -e "$D/.ocr_lines.txt" ]] || fail "不該留下暫存檔"
+    pass "OCR 簡體字幕轉台灣正體，原文另存"
+  else
+    echo "  ⏭  跳過 OCR 簡轉繁測試（沒裝 opencc）"
+  fi
+
   # 19. 完全沒有文字的影格寫「（無）」，不合併成「同上一張」：
   #     「（無）」比「（同上一張）」短，而且 agent 不用往回找
   ffmpeg -nostdin -loglevel error -f lavfi -i "color=c=gray:s=640x360:d=3" -r 30 -c:v libx264 -pix_fmt yuv420p -y "$TMPD/blank.mp4"
